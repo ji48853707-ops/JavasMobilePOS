@@ -1,0 +1,8 @@
+<resources>
+    <color name="navy">#0B4B6B</color>
+    <color name="navy_dark">#07354C</color>
+    <color name="bg">#EFF6F8</color>
+    <color name="text">#07354C</color>
+    <color name="muted">#6B7C85</color>
+    <color name="danger">#B42318</color>
+</resources>

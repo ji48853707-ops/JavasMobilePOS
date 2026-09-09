@@ -1,0 +1,9 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.JavasPOS" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">#07354C</item>
+        <item name="android:navigationBarColor">#000000</item>
+        <item name="android:colorAccent">#0B4B6B</item>
+    </style>
+</resources>
