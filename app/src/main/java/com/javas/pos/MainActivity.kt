@@ -13,6 +13,7 @@ import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.text.InputType
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -137,35 +138,33 @@ class MainActivity : AppCompatActivity() {
         currentScreen="login"
         stopScanner()
         mainHandler.removeCallbacks(cloudPoll)
-        val scroll=ScrollView(this).apply{ setBackgroundColor(Color.rgb(11,23,38)) }
+        val scroll=ScrollView(this).apply{ setBackgroundColor(Color.rgb(11,23,38)); isFillViewport=true }
         val outer=LinearLayout(this).apply{
             orientation=LinearLayout.VERTICAL
-            setPadding(dp(22),dp(42),dp(22),dp(42))
+            setPadding(dp(12),dp(10),dp(12),dp(10))
         }
         val c=card().apply{
             orientation=LinearLayout.VERTICAL
-            setPadding(dp(22),dp(24),dp(22),dp(24))
+            setPadding(dp(18),dp(12),dp(18),dp(12))
         }
         val logo=ImageView(this).apply{
             setImageResource(R.drawable.javas_logo)
             scaleType=ImageView.ScaleType.CENTER_INSIDE
         }
-        c.addView(logo,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(120)))
-        c.addView(centerText("JAVAS FISHING POS",27,true),matchWrap(top=8))
-        c.addView(centerText("낚시매장 종합관리 · 매장 공유",14,false,Color.GRAY),matchWrap(top=4,bottom=18))
+        c.addView(logo,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(72)))
+        c.addView(centerText("JAVAS FISHING POS",21,true),matchWrap(top=2))
+        c.addView(centerText("낚시매장 종합관리 · 매장 공유",12,false,Color.GRAY),matchWrap(top=1,bottom=8))
 
         val store=field("매장코드").apply{ setText(storeId) }
         val id=field("아이디 입력")
         val pw=field("비밀번호 입력").apply{ inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
 
-        c.addView(fieldLabel("매장코드")); c.addView(store,matchWrap(top=5))
-        c.addView(fieldLabel("아이디"),matchWrap(top=12)); c.addView(id,matchWrap(top=5))
-        c.addView(fieldLabel("비밀번호"),matchWrap(top=12)); c.addView(pw,matchWrap(top=5))
+        c.addView(fieldLabel("매장코드")); c.addView(store,matchWrap(top=2))
+        c.addView(fieldLabel("아이디"),matchWrap(top=6)); c.addView(id,matchWrap(top=2))
+        c.addView(fieldLabel("비밀번호"),matchWrap(top=6)); c.addView(pw,matchWrap(top=2))
         c.addView(primaryButton("로그인 · 매장 동기화"){
             loginWithCloud(store.text.toString().trim().uppercase(Locale.KOREA),id.text.toString().trim(),pw.text.toString())
-        },matchWrap(top=16))
-        c.addView(text("자바쓰피싱 본점 매장코드  JAVAS001",13,true,Color.DKGRAY),matchWrap(top=18))
-        c.addView(text("대표 javass01 / 1234 · 점장 cs001 / 1234 · 일반 직원 yh002 / 1234",13,false,Color.GRAY),matchWrap(top=5))
+        },matchWrap(top=6))
         outer.addView(c,matchWrap())
         scroll.addView(outer)
         setContentView(scroll)
@@ -173,6 +172,43 @@ class MainActivity : AppCompatActivity() {
 
     private fun loginWithCloud(requestStore:String,id:String,pw:String){
         if(requestStore.isBlank()||id.isBlank()||pw.isBlank()){toast("매장코드, 아이디, 비밀번호를 입력해 주세요.");return}
+
+        // 자바쓰 본점은 서버 상태와 상관없이 즉시 로그인되어 POS를 사용할 수 있다.
+        val local=users[id]
+        if(requestStore=="JAVAS001" && local!=null && local.passwordHash==hashPassword(pw) && local.active){
+            storeId=requestStore
+            currentUser=local
+            getSharedPreferences("javas_pos",MODE_PRIVATE).edit().putString("store_id",storeId).apply()
+            buildShell()
+            showDashboard()
+            toast("로그인 완료")
+
+            // 클라우드는 뒤에서 연결한다. 실패해도 판매/재고/상품관리는 계속 정상 사용한다.
+            syncExecutor.execute{
+                try{
+                    val result=cloud.login(requestStore,id,pw)
+                    val remote=cloud.getSnapshot(result.storeId,result.token)
+                    val hasRemote=hasBusinessData(remote)
+                    val hasLocal=products.isNotEmpty()||salesHistory.isNotEmpty()||suppliers.isNotEmpty()||customers.isNotEmpty()||tickets.isNotEmpty()
+                    if(!hasRemote&&hasLocal) cloud.putSnapshot(result.storeId,result.token,buildCloudSnapshot())
+                    runOnUiThread{
+                        cloudToken=result.token
+                        if(hasRemote) applyCloudSnapshot(remote)
+                        mainHandler.removeCallbacks(cloudPoll)
+                        mainHandler.postDelayed(cloudPoll,5000)
+                    }
+                }catch(_:Exception){
+                    // 서버 접근이 막혀도 로컬 POS 사용을 방해하지 않는다.
+                }
+            }
+            return
+        }
+
+        if(requestStore=="JAVAS001"){
+            toast("아이디 또는 비밀번호를 확인해 주세요.")
+            return
+        }
+
         toast("매장 서버 연결 중")
         syncExecutor.execute{
             try{
@@ -180,39 +216,21 @@ class MainActivity : AppCompatActivity() {
                 val remote=cloud.getSnapshot(result.storeId,result.token)
                 val hasRemote=hasBusinessData(remote)
                 val hasLocal=products.isNotEmpty()||salesHistory.isNotEmpty()||suppliers.isNotEmpty()||customers.isNotEmpty()||tickets.isNotEmpty()
-                if(!hasRemote&&hasLocal){
-                    cloud.putSnapshot(result.storeId,result.token,buildCloudSnapshot())
-                }
+                if(!hasRemote&&hasLocal) cloud.putSnapshot(result.storeId,result.token,buildCloudSnapshot())
                 runOnUiThread{
                     storeId=result.storeId
                     cloudToken=result.token
                     getSharedPreferences("javas_pos",MODE_PRIVATE).edit().putString("store_id",storeId).apply()
-                    currentUser=UserAccount(
-                        result.userId,
-                        result.name,
-                        try{Role.valueOf(result.role)}catch(_:Exception){Role.STAFF},
-                        hashPassword(pw),
-                        true
-                    )
+                    currentUser=UserAccount(result.userId,result.name,try{Role.valueOf(result.role)}catch(_:Exception){Role.STAFF},hashPassword(pw),true)
                     if(hasRemote) applyCloudSnapshot(remote)
-                    buildShell()
-                    showDashboard()
-                    mainHandler.removeCallbacks(cloudPoll)
-                    mainHandler.postDelayed(cloudPoll,5000)
+                    buildShell(); showDashboard()
+                    mainHandler.removeCallbacks(cloudPoll); mainHandler.postDelayed(cloudPoll,5000)
                     toast("매장 공유 연결 완료")
                 }
             }catch(e:CloudSync.HttpError){
-                runOnUiThread{toast(if(e.status==401)"아이디 또는 비밀번호를 확인해 주세요." else if(e.status==404)"등록되지 않은 매장코드입니다." else "서버 로그인 실패 (${e.status})")}
-            }catch(e:IOException){
-                runOnUiThread{
-                    val savedStore=getSharedPreferences("javas_pos",MODE_PRIVATE).getString("store_id","JAVAS001")?:"JAVAS001"
-                    if(requestStore==savedStore){
-                        toast("인터넷 연결 없음 · 오프라인 모드")
-                        loginOffline(id,pw)
-                    }else toast("인터넷 연결 후 새 매장에 로그인해 주세요.")
-                }
-            }catch(e:Exception){
-                runOnUiThread{toast("동기화 연결 오류")}
+                runOnUiThread{toast(if(e.status==401)"아이디 또는 비밀번호를 확인해 주세요." else if(e.status==404)"등록되지 않은 매장코드입니다." else "매장 서버 연결을 확인해 주세요.")}
+            }catch(_:Exception){
+                runOnUiThread{toast("매장 서버 연결을 확인해 주세요.")}
             }
         }
     }
@@ -243,39 +261,47 @@ class MainActivity : AppCompatActivity() {
     private fun roleLabel(r:Role)=when(r){Role.HQ->"본사 총관리자";Role.OWNER->"가맹점 대표";Role.MANAGER->"점장";Role.STAFF->"일반 직원"}
 
     private fun buildShell(){
-        val scroll=ScrollView(this).apply{ setBackgroundColor(Color.rgb(239,246,248)) }
-        root=LinearLayout(this).apply{ orientation=LinearLayout.VERTICAL; setPadding(dp(18),dp(18),dp(18),dp(30)) }
+        val scroll=ScrollView(this).apply{ setBackgroundColor(Color.rgb(239,246,248)); isFillViewport=true }
+        root=LinearLayout(this).apply{ orientation=LinearLayout.VERTICAL; setPadding(dp(8),dp(8),dp(8),dp(14)) }
         scroll.addView(root,ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT))
         setContentView(scroll)
 
-        val head=card().apply{ orientation=LinearLayout.VERTICAL; setPadding(dp(12),dp(12),dp(12),dp(12)) }
+        val head=card().apply{ orientation=LinearLayout.VERTICAL; setPadding(dp(10),dp(9),dp(10),dp(9)) }
         val top=LinearLayout(this).apply{ orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL }
         val logo=ImageView(this).apply{ setImageResource(R.drawable.javas_logo); scaleType=ImageView.ScaleType.CENTER_INSIDE }
-        top.addView(logo,LinearLayout.LayoutParams(dp(92),dp(92)))
+        top.addView(logo,LinearLayout.LayoutParams(dp(64),dp(64)))
         top.addView(LinearLayout(this).apply{
-            orientation=LinearLayout.VERTICAL; setPadding(dp(10),0,0,0)
-            addView(text("JAVAS FISHING POS",22,true))
-            addView(text("낚시매장 종합관리",14,false,Color.GRAY))
+            orientation=LinearLayout.VERTICAL; setPadding(dp(8),0,0,0)
+            addView(text("JAVAS FISHING POS",18,true).apply{maxLines=2;ellipsize=TextUtils.TruncateAt.END})
+            addView(text("낚시매장 종합관리",11,false,Color.GRAY))
         },LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f))
         head.addView(top)
-        head.addView(LinearLayout(this).apply{
-            orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL; setPadding(0,dp(8),0,0)
-            addView(text("$storeId · ${currentUser?.name} · ${roleLabel(currentUser?.role?:Role.STAFF)}",14,true,Color.DKGRAY),LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f))
-            addView(secondaryButton("동기화"){pullCloudAsync(true)},LinearLayout.LayoutParams(dp(88),dp(44)).apply{marginEnd=dp(5)})
-            addView(secondaryButton("로그아웃"){logout()},LinearLayout.LayoutParams(dp(88),dp(44)))
-        })
-        root.addView(head,matchWrap(bottom=12))
+        head.addView(text("$storeId · ${currentUser?.name} · ${roleLabel(currentUser?.role?:Role.STAFF)}",12,true,Color.DKGRAY).apply{
+            maxLines=1;ellipsize=TextUtils.TruncateAt.END
+        },matchWrap(top=5))
+        val actions=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
+        actions.addView(secondaryButton("동기화"){pullCloudAsync(true)},LinearLayout.LayoutParams(0,dp(38),1f).apply{marginEnd=dp(4)})
+        actions.addView(secondaryButton("로그아웃"){logout()},LinearLayout.LayoutParams(0,dp(38),1f))
+        head.addView(actions,matchWrap(top=5))
+        root.addView(head,matchWrap(bottom=7))
 
-        val hs=HorizontalScrollView(this).apply{ isHorizontalScrollBarEnabled=false }
-        val nav=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
-        fun addNav(s:String,a:()->Unit){ nav.addView(navButton(s,a),LinearLayout.LayoutParams(dp(112),dp(58)).apply{marginEnd=dp(6)}) }
-        addNav("대시보드"){showDashboard()}
-        addNav("판매 POS"){showCalculate()}
-        if(canManageProducts()) addNav("상품관리"){showRegister()}
-        addNav("재고"){showStock()}
-        if(canViewSales()) addNav("매출"){showSales()}
-        if(canManageStaff()) addNav("관리자"){showAdmin()}
-        hs.addView(nav); root.addView(hs,matchWrap(bottom=12))
+        val navItems=mutableListOf<Pair<String,()->Unit>>()
+        navItems.add("대시보드" to {showDashboard()})
+        navItems.add("판매 POS" to {showCalculate()})
+        if(canManageProducts()) navItems.add("상품관리" to {showRegister()})
+        navItems.add("재고" to {showStock()})
+        if(canViewSales()) navItems.add("매출" to {showSales()})
+        if(canManageStaff()) navItems.add("관리자" to {showAdmin()})
+        val navCard=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(5),dp(5),dp(5),dp(5))}
+        navItems.chunked(3).forEachIndexed{ri,chunk->
+            val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
+            chunk.forEachIndexed{i,it->
+                row.addView(navButton(it.first,it.second),LinearLayout.LayoutParams(0,dp(42),1f).apply{if(i>0)marginStart=dp(4)})
+            }
+            repeat(3-chunk.size){row.addView(Space(this),LinearLayout.LayoutParams(0,dp(42),1f).apply{marginStart=dp(4)})}
+            navCard.addView(row,matchWrap(top=if(ri==0)0 else 4))
+        }
+        root.addView(navCard,matchWrap(bottom=7))
         content=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL}
         root.addView(content,matchWrap())
     }
@@ -291,16 +317,16 @@ class MainActivity : AppCompatActivity() {
         val asWait=tickets.count{it.type=="AS" && it.status!="완료"}
 
         val title=card().apply{
-            orientation=LinearLayout.VERTICAL; setPadding(dp(16),dp(16),dp(16),dp(16))
-            addView(text("JAVAS FISHING 낚시매장 종합관리",25,true))
-            addView(text("판매 · 상품 · 재고 · 보관 · 매출 · 거래처 · 고객/AS · 직원",14,false,Color.GRAY),matchWrap(top=5))
+            orientation=LinearLayout.VERTICAL; setPadding(dp(10),dp(9),dp(10),dp(9))
+            addView(text("JAVAS FISHING 낚시매장 종합관리",18,true))
+            addView(text("판매 · 상품 · 재고 · 보관 · 매출 · 거래처 · 고객/AS · 직원",11,false,Color.GRAY),matchWrap(top=2))
         }
-        content.addView(title,matchWrap(bottom=12))
-        content.addView(dashRow("오늘 매출","${money(todays.sumOf{it.total})}원","판매건수","${todays.size}건"),matchWrap(bottom=6))
-        content.addView(dashRow("재고부족","${low}개","장기재고","${long}개"),matchWrap(bottom=6))
-        content.addView(dashRow("유통기한 임박","${expiry}개","AS 대기","${asWait}건"),matchWrap(bottom=12))
+        content.addView(title,matchWrap(bottom=7))
+        content.addView(dashRow("오늘 매출","${money(todays.sumOf{it.total})}원","판매건수","${todays.size}건"),matchWrap(bottom=4))
+        content.addView(dashRow("재고부족","${low}개","장기재고","${long}개"),matchWrap(bottom=4))
+        content.addView(dashRow("유통기한 임박","${expiry}개","AS 대기","${asWait}건"),matchWrap(bottom=7))
 
-        val menu=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(14),dp(14),dp(14),dp(14));addView(text("종합관리 메뉴",22,true))}
+        val menu=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(9),dp(9),dp(9),dp(9));addView(text("종합관리 메뉴",16,true))}
         val items=mutableListOf<Pair<String,()->Unit>>()
         items.add("판매 POS" to {showCalculate()})
         if(canManageProducts()) items.add("상품관리" to {showRegister()})
@@ -313,17 +339,17 @@ class MainActivity : AppCompatActivity() {
         items.add("설정" to {showSettings()})
         items.chunked(2).forEach{ chunk ->
             val row=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
-            chunk.forEachIndexed{i,it-> row.addView(secondaryButton(it.first,it.second),LinearLayout.LayoutParams(0,dp(58),1f).apply{if(i==0)marginEnd=dp(6)})}
-            if(chunk.size==1) row.addView(Space(this),LinearLayout.LayoutParams(0,dp(58),1f))
-            menu.addView(row,matchWrap(top=7))
+            chunk.forEachIndexed{i,it-> row.addView(secondaryButton(it.first,it.second),LinearLayout.LayoutParams(0,dp(44),1f).apply{if(i==0)marginEnd=dp(4)})}
+            if(chunk.size==1) row.addView(Space(this),LinearLayout.LayoutParams(0,dp(44),1f))
+            menu.addView(row,matchWrap(top=4))
         }
         content.addView(menu,matchWrap())
     }
 
     private fun dashRow(a:String,av:String,b:String,bv:String)=LinearLayout(this).apply{
         orientation=LinearLayout.HORIZONTAL
-        addView(statBox(a,av),LinearLayout.LayoutParams(0,dp(108),1f).apply{marginEnd=dp(6)})
-        addView(statBox(b,bv),LinearLayout.LayoutParams(0,dp(108),1f))
+        addView(statBox(a,av),LinearLayout.LayoutParams(0,dp(76),1f).apply{marginEnd=dp(4)})
+        addView(statBox(b,bv),LinearLayout.LayoutParams(0,dp(76),1f))
     }
 
 
@@ -333,14 +359,14 @@ class MainActivity : AppCompatActivity() {
 
         val stats=card().apply{
             orientation=LinearLayout.HORIZONTAL
-            addView(statBox("등록상품",products.size.toString()),LinearLayout.LayoutParams(0,dp(110),1f))
-            addView(statBox("장바구니",cart.values.sumOf{it.qty}.toString()),LinearLayout.LayoutParams(0,dp(110),1f))
+            addView(statBox("등록상품",products.size.toString()),LinearLayout.LayoutParams(0,dp(82),1f))
+            addView(statBox("장바구니",cart.values.sumOf{it.qty}.toString()),LinearLayout.LayoutParams(0,dp(82),1f))
         }
-        content.addView(stats,matchWrap(bottom=12))
+        content.addView(stats,matchWrap(bottom=7))
 
         val scan=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(14),dp(16),dp(14),dp(16))}
-        scan.addView(centerText("빠른 바코드 · QR 스캔",23,true))
-        scan.addView(primaryButton("📷 카메라 스캔 시작"){ensureCamera(ScanMode.CALCULATE)},matchWrap(top=12))
+        scan.addView(centerText("빠른 바코드 · QR 스캔",18,true))
+        scan.addView(primaryButton("📷 카메라 스캔 시작"){ensureCamera(ScanMode.CALCULATE)},matchWrap(top=7))
         val pv=PreviewView(this).apply{
             visibility=View.GONE
             implementationMode=PreviewView.ImplementationMode.PERFORMANCE
@@ -352,16 +378,16 @@ class MainActivity : AppCompatActivity() {
         val manual=field("코드 직접 입력")
         val mr=LinearLayout(this).apply{
             orientation=LinearLayout.HORIZONTAL
-            addView(manual,LinearLayout.LayoutParams(0,dp(58),1f))
+            addView(manual,LinearLayout.LayoutParams(0,dp(40),1f))
             addView(secondaryButton("찾기"){
                 val c=normalizeCode(manual.text.toString())
                 if(c.isNotBlank()) processCalculateCode(c)
-            },LinearLayout.LayoutParams(dp(110),dp(58)).apply{marginStart=dp(8)})
+            },LinearLayout.LayoutParams(dp(82),dp(40)).apply{marginStart=dp(8)})
         }
-        scan.addView(mr,matchWrap(top=10))
-        content.addView(scan,matchWrap(bottom=12))
+        scan.addView(mr,matchWrap(top=6))
+        content.addView(scan,matchWrap(bottom=7))
 
-        val cc=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(16),dp(16),dp(16),dp(16));addView(text("장바구니",25,true))}
+        val cc=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10));addView(text("장바구니",18,true))}
         if(cart.isEmpty()){
             cc.addView(centerText("스캔한 상품이 없습니다.",17,false,Color.GRAY).apply{setPadding(0,dp(28),0,dp(28))})
         }else{
@@ -373,13 +399,13 @@ class MainActivity : AppCompatActivity() {
                     a.addView(smallButton("−"){
                         if(line.qty>1) line.qty-- else cart.remove(line.product.code)
                         showCalculate()
-                    },LinearLayout.LayoutParams(0,dp(48),1f))
-                    a.addView(centerText("${line.qty}개",17,true),LinearLayout.LayoutParams(0,dp(48),1f))
+                    },LinearLayout.LayoutParams(0,dp(40),1f))
+                    a.addView(centerText("${line.qty}개",17,true),LinearLayout.LayoutParams(0,dp(40),1f))
                     a.addView(smallButton("+"){
                         if(line.qty<line.product.stock) line.qty++ else toast("현재 재고 수량까지 담겼습니다.")
                         showCalculate()
-                    },LinearLayout.LayoutParams(0,dp(48),1f))
-                    a.addView(dangerButton("취소"){cart.remove(line.product.code);showCalculate()},LinearLayout.LayoutParams(0,dp(48),1.2f))
+                    },LinearLayout.LayoutParams(0,dp(40),1f))
+                    a.addView(dangerButton("취소"){cart.remove(line.product.code);showCalculate()},LinearLayout.LayoutParams(0,dp(40),1.2f))
                     addView(a)
                 }
                 cc.addView(item)
@@ -400,10 +426,10 @@ class MainActivity : AppCompatActivity() {
         val editing=editCode?.let{products[it]}
         val oldStock=editing?.stock
 
-        val c=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(16),dp(16),dp(16),dp(16))}
-        c.addView(text("상품등록 · 수정 · 취소",27,true))
+        val c=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10))}
+        c.addView(text("상품등록 · 수정 · 취소",20,true))
         c.addView(text(if(editing==null)"새 상품 정보를 입력해 주세요." else "등록된 상품 정보를 수정하는 중입니다.",14,false,Color.GRAY),matchWrap(top=4))
-        c.addView(primaryButton("📷 바코드 · QR 스캔"){ensureCamera(ScanMode.REGISTER)},matchWrap(top=14))
+        c.addView(primaryButton("📷 바코드 · QR 스캔"){ensureCamera(ScanMode.REGISTER)},matchWrap(top=9))
         val pv=PreviewView(this).apply{
             visibility=View.GONE;implementationMode=PreviewView.ImplementationMode.PERFORMANCE
             scaleType=PreviewView.ScaleType.FILL_CENTER;setBackgroundColor(Color.BLACK)
@@ -423,7 +449,7 @@ class MainActivity : AppCompatActivity() {
         val expiry=field("YYYY-MM-DD 또는 비워두기").apply{if(editing!=null)setText(editing.expiryDate)}
         val minStock=field("예: 5").apply{inputType=InputType.TYPE_CLASS_NUMBER;setText((editing?.minStock?:5).toString())}
 
-        fun addForm(label:String,v:EditText){c.addView(fieldLabel(label),matchWrap(top=11));c.addView(v,matchWrap(top=5))}
+        fun addForm(label:String,v:EditText){c.addView(fieldLabel(label),matchWrap(top=7));c.addView(v,matchWrap(top=5))}
         addForm("상품명",name);addForm("바코드 / QR 코드값",code);addForm("매입가",cost);addForm("판매가",price)
         addForm(if(editing==null)"초기 재고" else "현재 재고",stock);addForm("상품분류",category);addForm("거래처 / 공급업체",supplier)
         addForm("입고일",received);addForm("보관위치",location);addForm("유통기한 / 사용기한",expiry);addForm("최소재고 알림수량",minStock)
@@ -446,11 +472,11 @@ class MainActivity : AppCompatActivity() {
             if(editing==null && q>0) addStockMovement(nc,"입고",q,q,"상품 최초등록")
             else if(editing!=null && oldStock!=null && oldStock!=q) addStockMovement(nc,"재고조정",q-oldStock,q,"상품수정")
             saveData();toast(if(editing==null)"등록 완료: $n" else "수정 완료: $n");showRegister()
-        },matchWrap(top=16))
+        },matchWrap(top=9))
         c.addView(secondaryButton(if(editing==null)"등록 취소" else "수정 취소"){showRegister()},matchWrap(top=7))
-        content.addView(c,matchWrap(bottom=12))
+        content.addView(c,matchWrap(bottom=7))
 
-        val list=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(16),dp(16),dp(16),dp(16));addView(text("등록 상품",24,true))}
+        val list=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10));addView(text("등록 상품",24,true))}
         products.values.toList().forEach{p->
             val item=LinearLayout(this).apply{
                 orientation=LinearLayout.VERTICAL;setPadding(0,dp(12),0,dp(12))
@@ -459,13 +485,13 @@ class MainActivity : AppCompatActivity() {
                 val meta=listOf(p.category,p.supplier,p.storageLocation).filter{it.isNotBlank()}.joinToString(" · ")
                 if(meta.isNotBlank())addView(text(meta,13,false,Color.GRAY),matchWrap(top=2))
                 val a=LinearLayout(this@MainActivity).apply{orientation=LinearLayout.HORIZONTAL}
-                a.addView(secondaryButton("수정"){showRegister(editCode=p.code)},LinearLayout.LayoutParams(0,dp(50),1f).apply{marginEnd=dp(6)})
-                a.addView(dangerButton("삭제"){confirmDeleteProduct(p.code)},LinearLayout.LayoutParams(0,dp(50),1f))
+                a.addView(secondaryButton("수정"){showRegister(editCode=p.code)},LinearLayout.LayoutParams(0,dp(42),1f).apply{marginEnd=dp(6)})
+                a.addView(dangerButton("삭제"){confirmDeleteProduct(p.code)},LinearLayout.LayoutParams(0,dp(42),1f))
                 addView(a,matchWrap(top=8))
             }
             list.addView(item)
         }
-        if(products.isEmpty())list.addView(centerText("등록 상품 없음",17,false,Color.GRAY),matchWrap(top=12))
+        if(products.isEmpty())list.addView(centerText("등록 상품 없음",17,false,Color.GRAY),matchWrap(top=7))
         content.addView(list,matchWrap())
     }
 
@@ -480,8 +506,8 @@ class MainActivity : AppCompatActivity() {
         currentScreen="stock"
         stopScanner();content.removeAllViews()
         val c=card().apply{
-            orientation=LinearLayout.VERTICAL;setPadding(dp(16),dp(16),dp(16),dp(16))
-            addView(text("재고 · 입출고 관리",27,true))
+            orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10))
+            addView(text("재고 · 입출고 관리",20,true))
             addView(text(if(canAdjustStock())"입고 · 조정 · 파손 · 분실 · 반품 이력을 남깁니다." else "현재 재고를 확인합니다.",14,false,Color.GRAY),matchWrap(top=4,bottom=8))
         }
         products.values.toList().forEach{p->
@@ -493,16 +519,16 @@ class MainActivity : AppCompatActivity() {
                 if(p.storageLocation.isNotBlank())addView(text("보관위치 ${p.storageLocation}",13,false,Color.GRAY),matchWrap(top=2))
                 if(canAdjustStock()){
                     val a=LinearLayout(this@MainActivity).apply{orientation=LinearLayout.HORIZONTAL}
-                    a.addView(secondaryButton("입고"){showStockAdjustDialog(p.code,"입고",true)},LinearLayout.LayoutParams(0,dp(46),1f).apply{marginEnd=dp(5)})
-                    a.addView(secondaryButton("조정"){showStockAdjustDialog(p.code,"재고조정",null)},LinearLayout.LayoutParams(0,dp(46),1f).apply{marginEnd=dp(5)})
-                    a.addView(dangerButton("파손/분실"){showLossDialog(p.code)},LinearLayout.LayoutParams(0,dp(46),1f))
+                    a.addView(secondaryButton("입고"){showStockAdjustDialog(p.code,"입고",true)},LinearLayout.LayoutParams(0,dp(40),1f).apply{marginEnd=dp(5)})
+                    a.addView(secondaryButton("조정"){showStockAdjustDialog(p.code,"재고조정",null)},LinearLayout.LayoutParams(0,dp(40),1f).apply{marginEnd=dp(5)})
+                    a.addView(dangerButton("파손/분실"){showLossDialog(p.code)},LinearLayout.LayoutParams(0,dp(40),1f))
                     addView(a,matchWrap(top=7))
                 }
             }
             c.addView(row)
         }
         if(stockHistory.isNotEmpty()){
-            c.addView(text("최근 입출고 이력",21,true),matchWrap(top=16))
+            c.addView(text("최근 입출고 이력",21,true),matchWrap(top=9))
             stockHistory.asReversed().take(30).forEach{m->
                 val sign=if(m.qty>0)"+" else ""
                 c.addView(text("${formatDateTime(m.timestamp)} · ${products[m.code]?.name?:m.code}",15,true),matchWrap(top=8))
@@ -546,8 +572,8 @@ class MainActivity : AppCompatActivity() {
         currentScreen="storage"
         stopScanner();content.removeAllViews()
         val c=card().apply{
-            orientation=LinearLayout.VERTICAL;setPadding(dp(16),dp(16),dp(16),dp(16))
-            addView(text("보관 · 유통기한 관리",27,true))
+            orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10))
+            addView(text("보관 · 유통기한 관리",20,true))
             addView(text("입고 후 180일 이상은 장기재고, 유통기한 30일 이내는 임박으로 표시합니다.",14,false,Color.GRAY),matchWrap(top=4,bottom=10))
         }
         products.values.sortedBy{it.name}.forEach{p->
@@ -573,8 +599,8 @@ class MainActivity : AppCompatActivity() {
         val t=salesHistory.filter{dateKey(it.timestamp)==today}.sumOf{it.total}
         val y=salesHistory.filter{dateKey(it.timestamp)==yesterday}.sumOf{it.total}
         val m=salesHistory.filter{dateKey(it.timestamp).startsWith(month)}
-        val c=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(16),dp(16),dp(16),dp(16));addView(text("매출 · 정산",27,true))}
-        c.addView(dashRow("오늘","${money(t)}원","어제","${money(y)}원"),matchWrap(top=10))
+        val c=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10));addView(text("매출 · 정산",20,true))}
+        c.addView(dashRow("오늘","${money(t)}원","어제","${money(y)}원"),matchWrap(top=6))
         c.addView(dashRow("이번 달","${money(m.sumOf{it.total})}원","예상 이익","${money(m.sumOf{it.profit})}원"),matchWrap(top=6,bottom=12))
         c.addView(text("누적 매출 ${money(salesTotal)}원",20,true),matchWrap(top=4,bottom=8))
         val grouped=salesHistory.groupBy{dateKey(it.timestamp)}.toSortedMap(compareByDescending{it})
@@ -591,13 +617,13 @@ class MainActivity : AppCompatActivity() {
         if(!canManageSuppliers()){toast("거래처 관리 권한이 없습니다.");showDashboard();return}
         stopScanner();content.removeAllViews()
         val c=card().apply{
-            orientation=LinearLayout.VERTICAL;setPadding(dp(16),dp(16),dp(16),dp(16))
-            addView(text("매입 · 거래처 관리",27,true))
+            orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10))
+            addView(text("매입 · 거래처 관리",20,true))
             addView(text("매입/입고를 등록하면 상품 재고가 자동으로 증가합니다.",14,false,Color.GRAY),matchWrap(top=4))
-            addView(primaryButton("+ 거래처 등록"){showAddSupplierDialog()},matchWrap(top=12))
+            addView(primaryButton("+ 거래처 등록"){showAddSupplierDialog()},matchWrap(top=7))
             addView(secondaryButton("+ 매입 · 입고 등록"){showPurchaseDialog()},matchWrap(top=7))
         }
-        c.addView(text("등록 거래처",21,true),matchWrap(top=16))
+        c.addView(text("등록 거래처",21,true),matchWrap(top=9))
         suppliers.values.forEach{s->
             c.addView(text(s.name,18,true),matchWrap(top=9))
             val meta=listOf(s.manager.takeIf{it.isNotBlank()}?.let{"담당 $it"},s.phone.takeIf{it.isNotBlank()}?.let{"연락처 $it"}).filterNotNull().joinToString(" · ")
@@ -606,7 +632,7 @@ class MainActivity : AppCompatActivity() {
         }
         if(suppliers.isEmpty())c.addView(text("등록된 거래처가 없습니다.",15,false,Color.GRAY),matchWrap(top=7))
         if(purchaseHistory.isNotEmpty()){
-            c.addView(text("최근 매입 내역",21,true),matchWrap(top=16))
+            c.addView(text("최근 매입 내역",21,true),matchWrap(top=9))
             purchaseHistory.asReversed().take(30).forEach{r->
                 c.addView(text("${formatDateTime(r.timestamp)} · ${r.productName}",15,true),matchWrap(top=8))
                 c.addView(text("${r.supplierName} · ${r.qty}개 × ${money(r.unitCost)}원 = ${money(r.total)}원",13,false,Color.GRAY),matchWrap(top=2))
@@ -675,12 +701,12 @@ class MainActivity : AppCompatActivity() {
         if(!canManageCustomers()){toast("고객/AS 관리 권한이 없습니다.");showDashboard();return}
         stopScanner();content.removeAllViews()
         val c=card().apply{
-            orientation=LinearLayout.VERTICAL;setPadding(dp(16),dp(16),dp(16),dp(16))
-            addView(text("고객 · 예약 · AS",27,true))
-            addView(primaryButton("+ 고객 등록"){showAddCustomerDialog()},matchWrap(top=12))
+            orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10))
+            addView(text("고객 · 예약 · AS",20,true))
+            addView(primaryButton("+ 고객 등록"){showAddCustomerDialog()},matchWrap(top=7))
             addView(secondaryButton("+ 예약 / AS 접수"){showAddTicketDialog()},matchWrap(top=7))
         }
-        c.addView(text("처리 대기",21,true),matchWrap(top=16))
+        c.addView(text("처리 대기",21,true),matchWrap(top=9))
         val open=tickets.filter{it.status!="완료"}.sortedByDescending{it.createdAt}
         open.forEach{t->
             c.addView(text("${t.type} · ${t.customerName}",18,true),matchWrap(top=9))
@@ -688,8 +714,8 @@ class MainActivity : AppCompatActivity() {
             val a=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
             a.addView(secondaryButton(if(t.status=="접수")"진행중" else "완료"){
                 t.status=if(t.status=="접수")"진행중" else "완료";saveData();showCustomerService()
-            },LinearLayout.LayoutParams(0,dp(46),1f).apply{marginEnd=dp(5)})
-            a.addView(dangerButton("삭제"){confirmDeleteTicket(t.id)},LinearLayout.LayoutParams(0,dp(46),1f))
+            },LinearLayout.LayoutParams(0,dp(40),1f).apply{marginEnd=dp(5)})
+            a.addView(dangerButton("삭제"){confirmDeleteTicket(t.id)},LinearLayout.LayoutParams(0,dp(40),1f))
             c.addView(a,matchWrap(top=6))
         }
         if(open.isEmpty())c.addView(text("대기 중인 예약/AS가 없습니다.",15,false,Color.GRAY),matchWrap(top=7))
@@ -754,20 +780,19 @@ class MainActivity : AppCompatActivity() {
         if(!canManageStaff()){toast("직원관리 권한이 없습니다.");showDashboard();return}
         stopScanner();content.removeAllViews()
         val c=card().apply{
-            orientation=LinearLayout.VERTICAL;setPadding(dp(16),dp(16),dp(16),dp(16))
-            addView(text("직원 · 권한 관리",27,true))
-            addView(text("가맹점 대표는 점장과 일반 직원 계정을 관리합니다.",14,false,Color.GRAY),matchWrap(top=4))
-            addView(text("가맹점 대표 · 전체관리 + 직원관리\n점장 · 판매 + 상품 + 재고 + 매출 + 거래처 + 고객/AS\n일반 직원 · 판매 + 재고조회",14,false,Color.DKGRAY),matchWrap(top=12))
-            addView(primaryButton("+ 직원 추가"){showAddEmployeeDialog()},matchWrap(top=12))
+            orientation=LinearLayout.VERTICAL;setPadding(dp(11),dp(10),dp(11),dp(10))
+            addView(text("직원 · 권한 관리",20,true))
+            addView(text("대표: 전체관리 + 직원관리 / 점장: 판매·상품·재고·매출·거래처·고객/AS / 일반: 판매·재고조회",11,false,Color.DKGRAY),matchWrap(top=4))
+            addView(primaryButton("+ 직원 추가"){showAddEmployeeDialog()},matchWrap(top=7))
         }
         users.values.filter{it.role!=Role.HQ&&it.role!=Role.OWNER}.forEach{u->
-            c.addView(text("${u.name} · ${roleLabel(u.role)}",18,true),matchWrap(top=11))
-            c.addView(text("ID ${u.id} · ${if(u.active)"사용중" else "사용중지"}",14,false,if(u.active)Color.rgb(21,115,71) else Color.rgb(180,35,24)),matchWrap(top=3))
+            c.addView(text("${u.name} · ${roleLabel(u.role)}",15,true),matchWrap(top=8))
+            c.addView(text("ID ${u.id} · ${if(u.active)"사용중" else "사용중지"}",11,false,if(u.active)Color.rgb(21,115,71) else Color.rgb(180,35,24)),matchWrap(top=1))
             val a=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
-            a.addView(secondaryButton("권한수정"){showRoleDialog(u.id)},LinearLayout.LayoutParams(0,dp(48),1f).apply{marginEnd=dp(5)})
-            a.addView(secondaryButton(if(u.active)"중지" else "재개"){u.active=!u.active;saveData();showAdmin()},LinearLayout.LayoutParams(0,dp(48),1f).apply{marginEnd=dp(5)})
-            a.addView(dangerButton("삭제"){confirmDeleteUser(u.id)},LinearLayout.LayoutParams(0,dp(48),1f))
-            c.addView(a,matchWrap(top=7))
+            a.addView(secondaryButton("권한수정"){showRoleDialog(u.id)},LinearLayout.LayoutParams(0,dp(38),1f).apply{marginEnd=dp(4)})
+            a.addView(secondaryButton(if(u.active)"중지" else "재개"){u.active=!u.active;saveData();showAdmin()},LinearLayout.LayoutParams(0,dp(38),1f).apply{marginEnd=dp(4)})
+            a.addView(dangerButton("삭제"){confirmDeleteUser(u.id)},LinearLayout.LayoutParams(0,dp(38),1f))
+            c.addView(a,matchWrap(top=4))
         }
         content.addView(c,matchWrap())
     }
@@ -812,10 +837,10 @@ class MainActivity : AppCompatActivity() {
         currentScreen="settings"
         stopScanner();content.removeAllViews()
         val c=card().apply{
-            orientation=LinearLayout.VERTICAL;setPadding(dp(18),dp(18),dp(18),dp(18))
-            addView(text("설정",27,true))
-            addView(text("매장코드 $storeId\n매장 자바쓰피싱 본점\n사용자 ${currentUser?.name}\n권한 ${roleLabel(currentUser?.role?:Role.STAFF)}\n클라우드 ${if(cloudToken.isNotBlank())"연결됨" else "오프라인"}\n버전 종합관리 4단계",15,false,Color.DKGRAY),matchWrap(top=10))
-            addView(secondaryButton("로그아웃"){logout()},matchWrap(top=16))
+            orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10))
+            addView(text("설정",20,true))
+            addView(text("매장코드 $storeId\n매장 자바쓰피싱 본점\n사용자 ${currentUser?.name}\n권한 ${roleLabel(currentUser?.role?:Role.STAFF)}\n클라우드 ${if(cloudToken.isNotBlank())"연결됨" else "오프라인"}\n버전 종합관리 4단계",15,false,Color.DKGRAY),matchWrap(top=6))
+            addView(secondaryButton("로그아웃"){logout()},matchWrap(top=9))
         }
         content.addView(c,matchWrap())
     }
@@ -1120,21 +1145,21 @@ class MainActivity : AppCompatActivity() {
     private fun dp(v:Int)=(v*resources.displayMetrics.density).toInt()
     private fun matchWrap(top:Int=0,bottom:Int=0)=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT).apply{topMargin=dp(top);bottomMargin=dp(bottom)}
     private fun rounded(fill:Int,stroke:Int=Color.TRANSPARENT)=android.graphics.drawable.GradientDrawable().apply{
-        color=android.content.res.ColorStateList.valueOf(fill);cornerRadius=dp(18).toFloat();setStroke(dp(1),stroke)
+        color=android.content.res.ColorStateList.valueOf(fill);cornerRadius=dp(14).toFloat();setStroke(dp(1),stroke)
     }
     private fun card()=LinearLayout(this).apply{background=rounded(Color.WHITE);elevation=dp(2).toFloat()}
-    private fun text(s:String,size:Int,bold:Boolean,color:Int=Color.rgb(7,53,76))=TextView(this).apply{text=s;textSize=size.toFloat();setTextColor(color);if(bold)setTypeface(typeface,Typeface.BOLD)}
+    private fun text(s:String,size:Int,bold:Boolean,color:Int=Color.rgb(7,53,76))=TextView(this).apply{text=s;textSize=size.toFloat();includeFontPadding=false;setTextColor(color);if(bold)setTypeface(typeface,Typeface.BOLD)}
     private fun centerText(s:String,size:Int,bold:Boolean,color:Int=Color.rgb(7,53,76))=text(s,size,bold,color).apply{gravity=Gravity.CENTER}
-    private fun fieldLabel(s:String)=text(s,14,true,Color.rgb(52,64,84))
-    private fun field(h:String)=EditText(this).apply{hint=h;textSize=17f;setPadding(dp(14),dp(12),dp(14),dp(12));background=rounded(Color.WHITE,Color.rgb(205,216,221))}
-    private fun primaryButton(s:String,a:()->Unit)=Button(this).apply{text=s;textSize=18f;setTextColor(Color.WHITE);setTypeface(typeface,Typeface.BOLD);background=rounded(Color.rgb(11,75,107));setOnClickListener{a()}}
-    private fun secondaryButton(s:String,a:()->Unit)=Button(this).apply{text=s;textSize=16f;setTextColor(Color.rgb(7,83,105));setTypeface(typeface,Typeface.BOLD);background=rounded(Color.rgb(226,244,248));setOnClickListener{a()}}
-    private fun dangerButton(s:String,a:()->Unit)=Button(this).apply{text=s;textSize=16f;setTextColor(Color.rgb(180,35,24));setTypeface(typeface,Typeface.BOLD);background=rounded(Color.rgb(255,237,235));setOnClickListener{a()}}
+    private fun fieldLabel(s:String)=text(s,12,true,Color.rgb(52,64,84))
+    private fun field(h:String)=EditText(this).apply{hint=h;textSize=15f;includeFontPadding=false;minHeight=dp(42);minimumHeight=dp(42);setPadding(dp(11),dp(6),dp(11),dp(6));background=rounded(Color.WHITE,Color.rgb(205,216,221))}
+    private fun primaryButton(s:String,a:()->Unit)=Button(this).apply{text=s;textSize=15f;includeFontPadding=false;minHeight=0;minimumHeight=0;setPadding(dp(8),dp(6),dp(8),dp(6));setTextColor(Color.WHITE);setTypeface(typeface,Typeface.BOLD);background=rounded(Color.rgb(11,75,107));setOnClickListener{a()}}
+    private fun secondaryButton(s:String,a:()->Unit)=Button(this).apply{text=s;textSize=13f;includeFontPadding=false;minHeight=0;minimumHeight=0;setPadding(dp(6),dp(5),dp(6),dp(5));setTextColor(Color.rgb(7,83,105));setTypeface(typeface,Typeface.BOLD);background=rounded(Color.rgb(226,244,248));setOnClickListener{a()}}
+    private fun dangerButton(s:String,a:()->Unit)=Button(this).apply{text=s;textSize=13f;includeFontPadding=false;minHeight=0;minimumHeight=0;setPadding(dp(6),dp(5),dp(6),dp(5));setTextColor(Color.rgb(180,35,24));setTypeface(typeface,Typeface.BOLD);background=rounded(Color.rgb(255,237,235));setOnClickListener{a()}}
     private fun smallButton(s:String,a:()->Unit)=secondaryButton(s,a)
-    private fun navButton(s:String,a:()->Unit)=Button(this).apply{text=s;textSize=15f;setTextColor(Color.rgb(7,53,76));setTypeface(typeface,Typeface.BOLD);background=rounded(Color.WHITE);setOnClickListener{a()}}
+    private fun navButton(s:String,a:()->Unit)=Button(this).apply{text=s;textSize=13f;includeFontPadding=false;minHeight=0;minimumHeight=0;setPadding(dp(4),dp(4),dp(4),dp(4));setTextColor(Color.rgb(7,53,76));setTypeface(typeface,Typeface.BOLD);background=rounded(Color.WHITE);setOnClickListener{a()}}
     private fun statBox(label:String,value:String)=LinearLayout(this).apply{
-        orientation=LinearLayout.VERTICAL;gravity=Gravity.CENTER_VERTICAL;setPadding(dp(15),dp(12),dp(15),dp(12));background=rounded(Color.rgb(247,250,251))
-        addView(text(label,15,false,Color.GRAY));addView(text(value,if(value.length>10)19 else 25,true))
+        orientation=LinearLayout.VERTICAL;gravity=Gravity.CENTER_VERTICAL;setPadding(dp(9),dp(7),dp(9),dp(7));background=rounded(Color.rgb(247,250,251))
+        addView(text(label,11,false,Color.GRAY));addView(text(value,if(value.length>10)15 else 18,true))
     }
 }
 
