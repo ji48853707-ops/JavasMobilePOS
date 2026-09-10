@@ -8,6 +8,8 @@ import android.graphics.Typeface
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Bundle
+import android.app.Activity
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.VibrationEffect
@@ -18,6 +20,11 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
@@ -36,6 +43,9 @@ import java.io.BufferedReader
 import java.io.IOException
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
+import java.net.CookieHandler
+import java.net.CookieManager
+import java.net.CookiePolicy
 import java.net.URL
 import java.security.MessageDigest
 import java.text.NumberFormat
@@ -44,6 +54,10 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.UUID
 import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
@@ -70,7 +84,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cameraExecutor:ExecutorService
     private lateinit var syncExecutor:ExecutorService
     private val mainHandler=Handler(Looper.getMainLooper())
-    private val cloud=CloudSync("https://javas-pos-cloud-zisfx8.v2.appdeploy.ai")
+    private lateinit var cloud:CloudSync
     private var cloudToken=""
     private var storeId="JAVAS001"
     private var applyingCloud=false
@@ -118,6 +132,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         cameraExecutor=Executors.newSingleThreadExecutor()
         syncExecutor=Executors.newSingleThreadExecutor()
+        cloud=CloudSync(this,"https://javas-pos-cloud-zisfx8.v2.appdeploy.ai")
         storeId=getSharedPreferences("javas_pos",MODE_PRIVATE).getString("store_id","JAVAS001")?:"JAVAS001"
         loadData()
         seedUsers()
@@ -131,6 +146,7 @@ class MainActivity : AppCompatActivity() {
         cameraExecutor.shutdown()
         syncExecutor.shutdown()
         mainHandler.removeCallbacks(cloudPoll)
+        if(::cloud.isInitialized) cloud.close()
         tone.release()
     }
 
@@ -138,14 +154,16 @@ class MainActivity : AppCompatActivity() {
         currentScreen="login"
         stopScanner()
         mainHandler.removeCallbacks(cloudPoll)
-        val scroll=ScrollView(this).apply{ setBackgroundColor(Color.rgb(11,23,38)); isFillViewport=true }
+        val scroll=ScrollView(this).apply{ setBackgroundColor(Color.WHITE); isFillViewport=true }
         val outer=LinearLayout(this).apply{
             orientation=LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
             setPadding(dp(12),dp(10),dp(12),dp(10))
         }
         val c=card().apply{
             orientation=LinearLayout.VERTICAL
             setPadding(dp(18),dp(12),dp(18),dp(12))
+            minimumHeight=(resources.displayMetrics.heightPixels-dp(70)).coerceAtLeast(0)
         }
         val logo=ImageView(this).apply{
             setImageResource(R.drawable.javas_logo)
@@ -173,14 +191,34 @@ class MainActivity : AppCompatActivity() {
     private fun loginWithCloud(requestStore:String,id:String,pw:String){
         if(requestStore.isBlank()||id.isBlank()||pw.isBlank()){toast("매장코드, 아이디, 비밀번호를 입력해 주세요.");return}
 
-        // 자바쓰 본점은 서버 상태와 상관없이 즉시 로그인되어 POS를 사용할 수 있다.
+        // 본사 총관리자는 반드시 서버에 인증한 뒤 가맹점 관리로 들어간다.
+        if(requestStore=="JAVAS001" && id=="hq"){
+            toast("본사 서버 연결 중")
+            syncExecutor.execute{
+                try{
+                    val result=cloud.login(requestStore,id,pw)
+                    runOnUiThread{
+                        storeId=result.storeId
+                        cloudToken=result.token
+                        currentUser=UserAccount(result.userId,result.name,Role.HQ,hashPassword(pw),true)
+                        getSharedPreferences("javas_pos",MODE_PRIVATE).edit().putString("store_id",storeId).apply()
+                        buildShell();showHqPortal()
+                        toast("본사 총관리자 연결 완료")
+                    }
+                }catch(e:CloudSync.HttpError){runOnUiThread{toast(if(e.status==401)"아이디 또는 비밀번호를 확인해 주세요." else "본사 서버 연결을 확인해 주세요.")}}
+                catch(_:Exception){runOnUiThread{toast("본사 서버 연결을 확인해 주세요.")}}
+            }
+            return
+        }
+
+        // 자바쓰 본점 가맹점 계정은 서버 상태와 상관없이 즉시 로그인되어 POS를 사용할 수 있다.
         val local=users[id]
         if(requestStore=="JAVAS001" && local!=null && local.passwordHash==hashPassword(pw) && local.active){
             storeId=requestStore
             currentUser=local
             getSharedPreferences("javas_pos",MODE_PRIVATE).edit().putString("store_id",storeId).apply()
             buildShell()
-            showDashboard()
+            if(local.role==Role.HQ) showHqPortal() else showDashboard()
             toast("로그인 완료")
 
             // 클라우드는 뒤에서 연결한다. 실패해도 판매/재고/상품관리는 계속 정상 사용한다.
@@ -214,16 +252,14 @@ class MainActivity : AppCompatActivity() {
             try{
                 val result=cloud.login(requestStore,id,pw)
                 val remote=cloud.getSnapshot(result.storeId,result.token)
-                val hasRemote=hasBusinessData(remote)
-                val hasLocal=products.isNotEmpty()||salesHistory.isNotEmpty()||suppliers.isNotEmpty()||customers.isNotEmpty()||tickets.isNotEmpty()
-                if(!hasRemote&&hasLocal) cloud.putSnapshot(result.storeId,result.token,buildCloudSnapshot())
                 runOnUiThread{
                     storeId=result.storeId
                     cloudToken=result.token
                     getSharedPreferences("javas_pos",MODE_PRIVATE).edit().putString("store_id",storeId).apply()
                     currentUser=UserAccount(result.userId,result.name,try{Role.valueOf(result.role)}catch(_:Exception){Role.STAFF},hashPassword(pw),true)
-                    if(hasRemote) applyCloudSnapshot(remote)
-                    buildShell(); showDashboard()
+                    // 새 가맹점 로그인 시 이전 매장 데이터가 섞이지 않도록 서버 자료로 완전히 교체한다.
+                    applyCloudSnapshot(remote)
+                    buildShell();showDashboard()
                     mainHandler.removeCallbacks(cloudPoll); mainHandler.postDelayed(cloudPoll,5000)
                     toast("매장 공유 연결 완료")
                 }
@@ -286,6 +322,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(head,matchWrap(bottom=7))
 
         val navItems=mutableListOf<Pair<String,()->Unit>>()
+        if(currentUser?.role==Role.HQ) navItems.add("본사관리" to {showHqPortal()})
         navItems.add("대시보드" to {showDashboard()})
         navItems.add("판매 POS" to {showCalculate()})
         if(canManageProducts()) navItems.add("상품관리" to {showRegister()})
@@ -328,6 +365,7 @@ class MainActivity : AppCompatActivity() {
 
         val menu=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(9),dp(9),dp(9),dp(9));addView(text("종합관리 메뉴",16,true))}
         val items=mutableListOf<Pair<String,()->Unit>>()
+        if(currentUser?.role==Role.HQ) items.add("본사 가맹점 관리" to {showHqPortal()})
         items.add("판매 POS" to {showCalculate()})
         if(canManageProducts()) items.add("상품관리" to {showRegister()})
         items.add("재고/입출고" to {showStock()})
@@ -775,6 +813,29 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("취소",null).show()
     }
 
+    private fun showHqPortal(){
+        if(currentUser?.role!=Role.HQ){toast("본사 총관리자 전용입니다.");return}
+        currentScreen="hq_portal"
+        stopScanner()
+        mainHandler.removeCallbacks(cloudPoll)
+        val page=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setBackgroundColor(Color.WHITE)}
+        val bar=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL;setPadding(dp(8),dp(8),dp(8),dp(8));setBackgroundColor(Color.rgb(239,246,248))}
+        bar.addView(secondaryButton("← POS"){buildShell();showDashboard()},LinearLayout.LayoutParams(dp(76),dp(40)))
+        bar.addView(text("본사 총관리자 · 가맹점 관리",16,true),LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f).apply{marginStart=dp(8)})
+        bar.addView(secondaryButton("로그아웃"){logout()},LinearLayout.LayoutParams(dp(76),dp(40)))
+        page.addView(bar,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT))
+        val web=WebView(this).apply{
+            settings.javaScriptEnabled=true
+            settings.domStorageEnabled=true
+            settings.useWideViewPort=true
+            settings.loadWithOverviewMode=false
+            webViewClient=WebViewClient()
+            loadUrl("https://javas-pos-cloud-zisfx8.v2.appdeploy.ai/#nativeToken="+Uri.encode(cloudToken))
+        }
+        page.addView(web,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,0,1f))
+        setContentView(page)
+    }
+
     private fun showAdmin(){
         currentScreen="admin"
         if(!canManageStaff()){toast("직원관리 권한이 없습니다.");showDashboard();return}
@@ -839,7 +900,7 @@ class MainActivity : AppCompatActivity() {
         val c=card().apply{
             orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10))
             addView(text("설정",20,true))
-            addView(text("매장코드 $storeId\n매장 자바쓰피싱 본점\n사용자 ${currentUser?.name}\n권한 ${roleLabel(currentUser?.role?:Role.STAFF)}\n클라우드 ${if(cloudToken.isNotBlank())"연결됨" else "오프라인"}\n버전 종합관리 4단계",15,false,Color.DKGRAY),matchWrap(top=6))
+            addView(text("매장코드 $storeId\n매장 자바쓰피싱 본점\n사용자 ${currentUser?.name}\n권한 ${roleLabel(currentUser?.role?:Role.STAFF)}\n클라우드 ${if(cloudToken.isNotBlank())"연결됨" else "오프라인"}\n버전 종합관리 · 본사관리 연결",15,false,Color.DKGRAY),matchWrap(top=6))
             addView(secondaryButton("로그아웃"){logout()},matchWrap(top=9))
         }
         content.addView(c,matchWrap())
@@ -1163,88 +1224,51 @@ class MainActivity : AppCompatActivity() {
     }
 }
 
-class CloudSync(private val baseUrl: String) {
-    data class LoginResult(
-        val token: String,
-        val storeId: String,
-        val userId: String,
-        val name: String,
-        val role: String
-    )
+class CloudSync(private val activity: Activity, private val baseUrl: String) {
+    data class LoginResult(val token:String,val storeId:String,val userId:String,val name:String,val role:String)
+    class HttpError(val status:Int,message:String):IOException(message)
+    private class Pending{val latch=CountDownLatch(1);@Volatile var ok=false;@Volatile var payload=""}
+    private val pending=ConcurrentHashMap<String,Pending>()
+    private val ready=CountDownLatch(1)
+    private val webView:WebView
 
-    class HttpError(val status: Int, message: String) : IOException(message)
-
-    fun login(storeId: String, userId: String, password: String): LoginResult {
-        val body = JSONObject()
-            .put("storeId", storeId)
-            .put("userId", userId)
-            .put("password", password)
-        val result = request("POST", "/api/login", body, null)
-        val user = result.getJSONObject("user")
-        return LoginResult(
-            token = result.getString("token"),
-            storeId = result.getString("storeId"),
-            userId = user.getString("id"),
-            name = user.getString("name"),
-            role = user.getString("role")
-        )
-    }
-
-    fun getSnapshot(storeId: String, token: String): JSONObject {
-        val path = "/api/snapshot?storeId=${encode(storeId)}&token=${encode(token)}"
-        return request("GET", path, null, token).getJSONObject("snapshot")
-    }
-
-    fun putSnapshot(storeId: String, token: String, snapshot: JSONObject) {
-        val body = JSONObject()
-            .put("storeId", storeId)
-            .put("token", token)
-            .put("snapshot", snapshot)
-        request("PUT", "/api/snapshot", body, token)
-    }
-
-    private fun request(
-        method: String,
-        path: String,
-        body: JSONObject?,
-        token: String?
-    ): JSONObject {
-        val connection =
-            (URL(baseUrl.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
-                requestMethod = method
-                connectTimeout = 8000
-                readTimeout = 10000
-                setRequestProperty("Accept", "application/json")
-                setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                if (!token.isNullOrBlank()) setRequestProperty("x-javas-token", token)
-                doInput = true
-                if (body != null) doOutput = true
-            }
-
-        try {
-            if (body != null) {
-                connection.outputStream.use { out ->
-                    out.write(body.toString().toByteArray(Charsets.UTF_8))
-                }
-            }
-
-            val status = connection.responseCode
-            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-            val text =
-                if (stream != null) {
-                    BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { it.readText() }
-                } else ""
-
-            if (status !in 200..299) {
-                throw HttpError(status, text.ifBlank { "HTTP $status" })
-            }
-            return if (text.isBlank()) JSONObject() else JSONObject(text)
-        } finally {
-            connection.disconnect()
+    init{
+        webView=WebView(activity).apply{
+            settings.javaScriptEnabled=true
+            settings.domStorageEnabled=true
+            addJavascriptInterface(object{
+                @JavascriptInterface fun onResult(id:String,ok:Boolean,payload:String){pending[id]?.let{it.ok=ok;it.payload=payload;it.latch.countDown()}}
+            },"AndroidCloud")
+            webViewClient=object:WebViewClient(){override fun onPageFinished(view:WebView?,url:String?){ready.countDown()}}
+            loadUrl(baseUrl.trimEnd('/')+"/?nativeBridge=1")
         }
     }
 
-    private fun encode(value: String): String =
-        java.net.URLEncoder.encode(value, "UTF-8")
-}
+    fun close(){activity.runOnUiThread{try{webView.removeJavascriptInterface("AndroidCloud");webView.destroy()}catch(_:Exception){}}}
 
+    fun login(storeId:String,userId:String,password:String):LoginResult{
+        val r=request("POST","/api/login",JSONObject().put("storeId",storeId).put("userId",userId).put("password",password))
+        val u=r.getJSONObject("user")
+        return LoginResult(r.getString("token"),r.getString("storeId"),u.getString("id"),u.getString("name"),u.getString("role"))
+    }
+
+    fun getSnapshot(storeId:String,token:String):JSONObject=
+        request("GET","/api/snapshot?storeId=${encode(storeId)}&token=${encode(token)}",null).getJSONObject("snapshot")
+
+    fun putSnapshot(storeId:String,token:String,snapshot:JSONObject){
+        request("PUT","/api/snapshot",JSONObject().put("storeId",storeId).put("token",token).put("snapshot",snapshot))
+    }
+
+    private fun request(method:String,path:String,body:JSONObject?):JSONObject{
+        if(!ready.await(15,TimeUnit.SECONDS))throw IOException("cloud bridge not ready")
+        val id=UUID.randomUUID().toString();val p=Pending();pending[id]=p
+        val script="""(function(){var id=${JSONObject.quote(id)};window.JavasNativeApi.request(${JSONObject.quote(method)},${JSONObject.quote(path)},${body?.toString()?:"null"}).then(function(v){AndroidCloud.onResult(id,true,JSON.stringify(v));}).catch(function(e){AndroidCloud.onResult(id,false,JSON.stringify({status:(e&&e.status)||0,message:(e&&e.message)||'request_failed'}));});})();"""
+        activity.runOnUiThread{webView.evaluateJavascript(script,null)}
+        if(!p.latch.await(20,TimeUnit.SECONDS)){pending.remove(id);throw IOException("cloud request timeout")}
+        pending.remove(id)
+        if(!p.ok){val e=try{JSONObject(p.payload)}catch(_:Exception){JSONObject()};throw HttpError(e.optInt("status",0),e.optString("message",p.payload.ifBlank{"cloud request failed"}))}
+        return if(p.payload.isBlank()||p.payload=="null")JSONObject() else JSONObject(p.payload)
+    }
+
+    private fun encode(value:String)=java.net.URLEncoder.encode(value,"UTF-8")
+}
