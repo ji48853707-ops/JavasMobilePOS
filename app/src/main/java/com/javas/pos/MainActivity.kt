@@ -23,8 +23,6 @@ import android.widget.*
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
