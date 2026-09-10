@@ -8,6 +8,8 @@ import android.graphics.Typeface
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.text.InputType
@@ -29,6 +31,11 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.IOException
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
 import java.security.MessageDigest
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
@@ -60,6 +67,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var root:LinearLayout
     private lateinit var content:LinearLayout
     private lateinit var cameraExecutor:ExecutorService
+    private lateinit var syncExecutor:ExecutorService
+    private val mainHandler=Handler(Looper.getMainLooper())
+    private val cloud=CloudSync("https://javas-pos-cloud-zisfx8.v2.appdeploy.ai")
+    private var cloudToken=""
+    private var storeId="JAVAS001"
+    private var applyingCloud=false
+    private var currentScreen="login"
     private var cameraProvider:ProcessCameraProvider?=null
     private var previewView:PreviewView?=null
     private var currentMode=ScanMode.CALCULATE
@@ -88,6 +102,13 @@ class MainActivity : AppCompatActivity() {
     ).build()
     private val barcodeScanner by lazy { BarcodeScanning.getClient(scannerOptions) }
 
+    private val cloudPoll=object:Runnable{
+        override fun run(){
+            if(cloudToken.isNotBlank() && cart.isEmpty()) pullCloudAsync(false)
+            mainHandler.postDelayed(this,5000)
+        }
+    }
+
     private val requestCamera=registerForActivityResult(ActivityResultContracts.RequestPermission()){ granted ->
         if(granted) startScanner(currentMode) else toast("카메라 권한이 필요합니다.")
     }
@@ -95,6 +116,8 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState:Bundle?){
         super.onCreate(savedInstanceState)
         cameraExecutor=Executors.newSingleThreadExecutor()
+        syncExecutor=Executors.newSingleThreadExecutor()
+        storeId=getSharedPreferences("javas_pos",MODE_PRIVATE).getString("store_id","JAVAS001")?:"JAVAS001"
         loadData()
         seedUsers()
         showLogin()
@@ -105,11 +128,15 @@ class MainActivity : AppCompatActivity() {
         stopScanner()
         barcodeScanner.close()
         cameraExecutor.shutdown()
+        syncExecutor.shutdown()
+        mainHandler.removeCallbacks(cloudPoll)
         tone.release()
     }
 
     private fun showLogin(){
+        currentScreen="login"
         stopScanner()
+        mainHandler.removeCallbacks(cloudPoll)
         val scroll=ScrollView(this).apply{ setBackgroundColor(Color.rgb(11,23,38)) }
         val outer=LinearLayout(this).apply{
             orientation=LinearLayout.VERTICAL
@@ -125,20 +152,72 @@ class MainActivity : AppCompatActivity() {
         }
         c.addView(logo,LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,dp(120)))
         c.addView(centerText("JAVAS FISHING POS",27,true),matchWrap(top=8))
-        c.addView(centerText("낚시매장 종합관리 시스템",14,false,Color.GRAY),matchWrap(top=4,bottom=18))
+        c.addView(centerText("낚시매장 종합관리 · 매장 공유",14,false,Color.GRAY),matchWrap(top=4,bottom=18))
+
+        val store=field("매장코드").apply{ setText(storeId) }
         val id=field("아이디 입력")
         val pw=field("비밀번호 입력").apply{ inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
-        c.addView(fieldLabel("아이디")); c.addView(id,matchWrap(top=5))
+
+        c.addView(fieldLabel("매장코드")); c.addView(store,matchWrap(top=5))
+        c.addView(fieldLabel("아이디"),matchWrap(top=12)); c.addView(id,matchWrap(top=5))
         c.addView(fieldLabel("비밀번호"),matchWrap(top=12)); c.addView(pw,matchWrap(top=5))
-        c.addView(primaryButton("로그인"){ login(id.text.toString().trim(),pw.text.toString()) },matchWrap(top=16))
-        c.addView(text("초기 계정",13,true,Color.DKGRAY),matchWrap(top=18))
-        c.addView(text("본사 hq / 1234\n가맹점 대표 javass01 / 1234\n점장 cs001 / 1234\n일반 직원 yh002 / 1234",13,false,Color.GRAY),matchWrap(top=5))
+        c.addView(primaryButton("로그인 · 매장 동기화"){
+            loginWithCloud(store.text.toString().trim().uppercase(Locale.KOREA),id.text.toString().trim(),pw.text.toString())
+        },matchWrap(top=16))
+        c.addView(text("자바쓰피싱 본점 매장코드  JAVAS001",13,true,Color.DKGRAY),matchWrap(top=18))
+        c.addView(text("대표 javass01 / 1234 · 점장 cs001 / 1234 · 일반 직원 yh002 / 1234",13,false,Color.GRAY),matchWrap(top=5))
         outer.addView(c,matchWrap())
         scroll.addView(outer)
         setContentView(scroll)
     }
 
-    private fun login(id:String,pw:String){
+    private fun loginWithCloud(requestStore:String,id:String,pw:String){
+        if(requestStore.isBlank()||id.isBlank()||pw.isBlank()){toast("매장코드, 아이디, 비밀번호를 입력해 주세요.");return}
+        toast("매장 서버 연결 중")
+        syncExecutor.execute{
+            try{
+                val result=cloud.login(requestStore,id,pw)
+                val remote=cloud.getSnapshot(result.storeId,result.token)
+                val hasRemote=hasBusinessData(remote)
+                val hasLocal=products.isNotEmpty()||salesHistory.isNotEmpty()||suppliers.isNotEmpty()||customers.isNotEmpty()||tickets.isNotEmpty()
+                if(!hasRemote&&hasLocal){
+                    cloud.putSnapshot(result.storeId,result.token,buildCloudSnapshot())
+                }
+                runOnUiThread{
+                    storeId=result.storeId
+                    cloudToken=result.token
+                    getSharedPreferences("javas_pos",MODE_PRIVATE).edit().putString("store_id",storeId).apply()
+                    currentUser=UserAccount(
+                        result.userId,
+                        result.name,
+                        try{Role.valueOf(result.role)}catch(_:Exception){Role.STAFF},
+                        hashPassword(pw),
+                        true
+                    )
+                    if(hasRemote) applyCloudSnapshot(remote)
+                    buildShell()
+                    showDashboard()
+                    mainHandler.removeCallbacks(cloudPoll)
+                    mainHandler.postDelayed(cloudPoll,5000)
+                    toast("매장 공유 연결 완료")
+                }
+            }catch(e:CloudSync.HttpError){
+                runOnUiThread{toast(if(e.status==401)"아이디 또는 비밀번호를 확인해 주세요." else if(e.status==404)"등록되지 않은 매장코드입니다." else "서버 로그인 실패 (${e.status})")}
+            }catch(e:IOException){
+                runOnUiThread{
+                    val savedStore=getSharedPreferences("javas_pos",MODE_PRIVATE).getString("store_id","JAVAS001")?:"JAVAS001"
+                    if(requestStore==savedStore){
+                        toast("인터넷 연결 없음 · 오프라인 모드")
+                        loginOffline(id,pw)
+                    }else toast("인터넷 연결 후 새 매장에 로그인해 주세요.")
+                }
+            }catch(e:Exception){
+                runOnUiThread{toast("동기화 연결 오류")}
+            }
+        }
+    }
+
+    private fun loginOffline(id:String,pw:String){
         val u=users[id]
         if(u==null || u.passwordHash!=hashPassword(pw)){ toast("아이디 또는 비밀번호를 확인해 주세요."); return }
         if(!u.active){ toast("사용이 중지된 계정입니다."); return }
@@ -147,7 +226,13 @@ class MainActivity : AppCompatActivity() {
         showDashboard()
     }
 
-    private fun logout(){ currentUser=null; cart.clear(); showLogin() }
+    private fun logout(){
+        cloudToken=""
+        mainHandler.removeCallbacks(cloudPoll)
+        currentUser=null
+        cart.clear()
+        showLogin()
+    }
 
     private fun canManageProducts()=currentUser?.role in setOf(Role.HQ,Role.OWNER,Role.MANAGER)
     private fun canAdjustStock()=currentUser?.role in setOf(Role.HQ,Role.OWNER,Role.MANAGER)
@@ -175,8 +260,9 @@ class MainActivity : AppCompatActivity() {
         head.addView(top)
         head.addView(LinearLayout(this).apply{
             orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL; setPadding(0,dp(8),0,0)
-            addView(text("${currentUser?.name} · ${roleLabel(currentUser?.role?:Role.STAFF)}",14,true,Color.DKGRAY),LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f))
-            addView(secondaryButton("로그아웃"){logout()},LinearLayout.LayoutParams(dp(100),dp(44)))
+            addView(text("$storeId · ${currentUser?.name} · ${roleLabel(currentUser?.role?:Role.STAFF)}",14,true,Color.DKGRAY),LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1f))
+            addView(secondaryButton("동기화"){pullCloudAsync(true)},LinearLayout.LayoutParams(dp(88),dp(44)).apply{marginEnd=dp(5)})
+            addView(secondaryButton("로그아웃"){logout()},LinearLayout.LayoutParams(dp(88),dp(44)))
         })
         root.addView(head,matchWrap(bottom=12))
 
@@ -195,6 +281,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showDashboard(){
+        currentScreen="dashboard"
         stopScanner(); content.removeAllViews()
         val today=todayString()
         val todays=salesHistory.filter{dateKey(it.timestamp)==today}
@@ -241,6 +328,7 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun showCalculate(){
+        currentScreen="calculate"
         stopScanner(); content.removeAllViews(); currentMode=ScanMode.CALCULATE
 
         val stats=card().apply{
@@ -306,6 +394,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showRegister(prefillCode:String="",editCode:String?=null){
+        currentScreen="products"
         if(!canManageProducts()){toast("상품관리 권한이 없습니다.");showDashboard();return}
         stopScanner();content.removeAllViews();currentMode=ScanMode.REGISTER
         val editing=editCode?.let{products[it]}
@@ -388,6 +477,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showStock(){
+        currentScreen="stock"
         stopScanner();content.removeAllViews()
         val c=card().apply{
             orientation=LinearLayout.VERTICAL;setPadding(dp(16),dp(16),dp(16),dp(16))
@@ -453,6 +543,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showStorageExpiry(){
+        currentScreen="storage"
         stopScanner();content.removeAllViews()
         val c=card().apply{
             orientation=LinearLayout.VERTICAL;setPadding(dp(16),dp(16),dp(16),dp(16))
@@ -473,6 +564,7 @@ class MainActivity : AppCompatActivity() {
 
 
     private fun showSales(){
+        currentScreen="sales"
         if(!canViewSales()){toast("매출조회 권한이 없습니다.");showDashboard();return}
         stopScanner();content.removeAllViews()
         val today=todayString()
@@ -495,6 +587,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSuppliers(){
+        currentScreen="suppliers"
         if(!canManageSuppliers()){toast("거래처 관리 권한이 없습니다.");showDashboard();return}
         stopScanner();content.removeAllViews()
         val c=card().apply{
@@ -578,6 +671,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showCustomerService(){
+        currentScreen="customers"
         if(!canManageCustomers()){toast("고객/AS 관리 권한이 없습니다.");showDashboard();return}
         stopScanner();content.removeAllViews()
         val c=card().apply{
@@ -656,6 +750,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showAdmin(){
+        currentScreen="admin"
         if(!canManageStaff()){toast("직원관리 권한이 없습니다.");showDashboard();return}
         stopScanner();content.removeAllViews()
         val c=card().apply{
@@ -714,11 +809,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSettings(){
+        currentScreen="settings"
         stopScanner();content.removeAllViews()
         val c=card().apply{
             orientation=LinearLayout.VERTICAL;setPadding(dp(18),dp(18),dp(18),dp(18))
             addView(text("설정",27,true))
-            addView(text("매장 자바쓰피싱 본점\n사용자 ${currentUser?.name}\n권한 ${roleLabel(currentUser?.role?:Role.STAFF)}\n버전 종합관리 3단계",15,false,Color.DKGRAY),matchWrap(top=10))
+            addView(text("매장코드 $storeId\n매장 자바쓰피싱 본점\n사용자 ${currentUser?.name}\n권한 ${roleLabel(currentUser?.role?:Role.STAFF)}\n클라우드 ${if(cloudToken.isNotBlank())"연결됨" else "오프라인"}\n버전 종합관리 4단계",15,false,Color.DKGRAY),matchWrap(top=10))
             addView(secondaryButton("로그아웃"){logout()},matchWrap(top=16))
         }
         content.addView(c,matchWrap())
@@ -909,6 +1005,84 @@ class MainActivity : AppCompatActivity() {
             .putString("products",pa.toString()).putString("stock_history",sha.toString()).putString("sales_history",sa.toString())
             .putString("suppliers",spa.toString()).putString("purchase_history",pra.toString()).putString("customers",ca.toString())
             .putString("tickets",ta.toString()).putString("users",ua.toString()).putInt("sales",salesTotal).apply()
+        if(!applyingCloud && cloudToken.isNotBlank()) pushCloudAsync()
+    }
+
+    private fun hasBusinessData(snapshot:JSONObject):Boolean{
+        return listOf("products","sales_history","suppliers","customers","tickets").any{
+            (snapshot.optJSONArray(it)?.length()?:0) > 0
+        }
+    }
+
+    private fun buildCloudSnapshot():JSONObject{
+        val pref=getSharedPreferences("javas_pos",MODE_PRIVATE)
+        return JSONObject()
+            .put("products",JSONArray(pref.getString("products","[]")))
+            .put("stock_history",JSONArray(pref.getString("stock_history","[]")))
+            .put("sales_history",JSONArray(pref.getString("sales_history","[]")))
+            .put("suppliers",JSONArray(pref.getString("suppliers","[]")))
+            .put("purchase_history",JSONArray(pref.getString("purchase_history","[]")))
+            .put("customers",JSONArray(pref.getString("customers","[]")))
+            .put("tickets",JSONArray(pref.getString("tickets","[]")))
+            .put("users",JSONArray(pref.getString("users","[]")))
+    }
+
+    private fun applyCloudSnapshot(snapshot:JSONObject){
+        if(cart.isNotEmpty()) return
+        applyingCloud=true
+        try{
+            val pref=getSharedPreferences("javas_pos",MODE_PRIVATE)
+            val edit=pref.edit()
+            val keys=listOf("products","stock_history","sales_history","suppliers","purchase_history","customers","tickets")
+            keys.forEach{k-> edit.putString(k,(snapshot.optJSONArray(k)?:JSONArray()).toString())}
+            val remoteUsers=snapshot.optJSONArray("users")
+            if(remoteUsers!=null && remoteUsers.length()>0) edit.putString("users",remoteUsers.toString())
+            val remoteSales=snapshot.optJSONArray("sales_history")?:JSONArray()
+            var total=0
+            for(i in 0 until remoteSales.length()) total+=remoteSales.optJSONObject(i)?.optInt("total",0)?:0
+            edit.putInt("sales",total).putString("store_id",storeId).apply()
+
+            products.clear()
+            stockHistory.clear()
+            salesHistory.clear()
+            suppliers.clear()
+            purchaseHistory.clear()
+            customers.clear()
+            tickets.clear()
+            users.clear()
+            salesTotal=0
+            loadData()
+            seedUsers()
+        }finally{
+            applyingCloud=false
+        }
+    }
+
+    private fun pullCloudAsync(showMessage:Boolean){
+        if(cloudToken.isBlank()||cart.isNotEmpty()) return
+        syncExecutor.execute{
+            try{
+                val snapshot=cloud.getSnapshot(storeId,cloudToken)
+                runOnUiThread{
+                    applyCloudSnapshot(snapshot)
+                    if(currentScreen=="dashboard") showDashboard()
+                    if(showMessage) toast("최신 매장 데이터 동기화 완료")
+                }
+            }catch(_:Exception){
+                if(showMessage) runOnUiThread{toast("동기화 서버 연결을 확인해 주세요.")}
+            }
+        }
+    }
+
+    private fun pushCloudAsync(){
+        if(cloudToken.isBlank()) return
+        val snapshot=try{buildCloudSnapshot()}catch(_:Exception){return}
+        syncExecutor.execute{
+            try{
+                cloud.putSnapshot(storeId,cloudToken,snapshot)
+            }catch(_:Exception){
+            }
+        }
     }
 
     private fun addStockMovement(code:String,type:String,qty:Int,after:Int,note:String=""){
@@ -963,3 +1137,89 @@ class MainActivity : AppCompatActivity() {
         addView(text(label,15,false,Color.GRAY));addView(text(value,if(value.length>10)19 else 25,true))
     }
 }
+
+class CloudSync(private val baseUrl: String) {
+    data class LoginResult(
+        val token: String,
+        val storeId: String,
+        val userId: String,
+        val name: String,
+        val role: String
+    )
+
+    class HttpError(val status: Int, message: String) : IOException(message)
+
+    fun login(storeId: String, userId: String, password: String): LoginResult {
+        val body = JSONObject()
+            .put("storeId", storeId)
+            .put("userId", userId)
+            .put("password", password)
+        val result = request("POST", "/api/login", body, null)
+        val user = result.getJSONObject("user")
+        return LoginResult(
+            token = result.getString("token"),
+            storeId = result.getString("storeId"),
+            userId = user.getString("id"),
+            name = user.getString("name"),
+            role = user.getString("role")
+        )
+    }
+
+    fun getSnapshot(storeId: String, token: String): JSONObject {
+        val path = "/api/snapshot?storeId=${encode(storeId)}&token=${encode(token)}"
+        return request("GET", path, null, token).getJSONObject("snapshot")
+    }
+
+    fun putSnapshot(storeId: String, token: String, snapshot: JSONObject) {
+        val body = JSONObject()
+            .put("storeId", storeId)
+            .put("token", token)
+            .put("snapshot", snapshot)
+        request("PUT", "/api/snapshot", body, token)
+    }
+
+    private fun request(
+        method: String,
+        path: String,
+        body: JSONObject?,
+        token: String?
+    ): JSONObject {
+        val connection =
+            (URL(baseUrl.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
+                requestMethod = method
+                connectTimeout = 8000
+                readTimeout = 10000
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                if (!token.isNullOrBlank()) setRequestProperty("x-javas-token", token)
+                doInput = true
+                if (body != null) doOutput = true
+            }
+
+        try {
+            if (body != null) {
+                connection.outputStream.use { out ->
+                    out.write(body.toString().toByteArray(Charsets.UTF_8))
+                }
+            }
+
+            val status = connection.responseCode
+            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+            val text =
+                if (stream != null) {
+                    BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { it.readText() }
+                } else ""
+
+            if (status !in 200..299) {
+                throw HttpError(status, text.ifBlank { "HTTP $status" })
+            }
+            return if (text.isBlank()) JSONObject() else JSONObject(text)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun encode(value: String): String =
+        java.net.URLEncoder.encode(value, "UTF-8")
+}
+
