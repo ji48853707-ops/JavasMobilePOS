@@ -472,6 +472,22 @@ class MainActivity : AppCompatActivity() {
         val editing=editCode?.let{products[it]}
         val oldStock=editing?.stock
 
+        val topSearch=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10))}
+        topSearch.addView(text("상품 검색",20,true))
+        val topSearchField=field("상품명 · 바코드 · 분류 · 거래처").apply{
+            setText(searchQuery)
+            setSingleLine(true)
+        }
+        val topSearchRow=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
+        topSearchRow.addView(topSearchField,LinearLayout.LayoutParams(0,dp(42),1f))
+        topSearchRow.addView(
+            primaryButton("검색"){showRegister(searchQuery=topSearchField.text.toString().trim())},
+            LinearLayout.LayoutParams(dp(78),dp(42)).apply{marginStart=dp(6)}
+        )
+        topSearch.addView(topSearchRow,matchWrap(top=8))
+        if(searchQuery.isNotBlank()) topSearch.addView(secondaryButton("검색 초기화"){showRegister()},matchWrap(top=6))
+        content.addView(topSearch,matchWrap(bottom=7))
+
         val c=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10))}
         c.addView(text("상품등록 · 수정 · 취소",20,true))
         c.addView(text(if(editing==null)"새 상품 정보를 입력해 주세요." else "등록된 상품 정보를 수정하는 중입니다.",14,false,Color.GRAY),matchWrap(top=4))
@@ -523,20 +539,6 @@ class MainActivity : AppCompatActivity() {
         c.addView(secondaryButton(if(editing==null)"등록 취소" else "수정 취소"){showRegister()},matchWrap(top=7))
         content.addView(c,matchWrap(bottom=7))
 
-        val list=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10));addView(text("등록 상품",24,true))}
-        val search=field("상품명 · 바코드 · 분류 · 거래처 검색").apply{
-            setText(searchQuery)
-            setSingleLine(true)
-        }
-        val searchRow=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
-        searchRow.addView(search,LinearLayout.LayoutParams(0,dp(42),1f))
-        searchRow.addView(
-            secondaryButton("검색"){showRegister(searchQuery=search.text.toString().trim())},
-            LinearLayout.LayoutParams(dp(78),dp(42)).apply{marginStart=dp(6)}
-        )
-        list.addView(searchRow,matchWrap(top=8))
-        if(searchQuery.isNotBlank()) list.addView(secondaryButton("검색 초기화"){showRegister()},matchWrap(top=6))
-
         val q=searchQuery.trim().lowercase(Locale.KOREA)
         val visibleProducts=products.values.filter{p->
             q.isBlank() ||
@@ -546,6 +548,11 @@ class MainActivity : AppCompatActivity() {
             p.supplier.lowercase(Locale.KOREA).contains(q)
         }
 
+        val list=card().apply{
+            orientation=LinearLayout.VERTICAL
+            setPadding(dp(10),dp(10),dp(10),dp(10))
+            addView(text(if(q.isBlank())"등록 상품 ${products.size}개" else "검색 결과 ${visibleProducts.size}개",24,true))
+        }
         visibleProducts.forEach{p->
             val item=LinearLayout(this).apply{
                 orientation=LinearLayout.VERTICAL;setPadding(0,dp(12),0,dp(12))
