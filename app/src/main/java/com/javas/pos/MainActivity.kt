@@ -134,6 +134,11 @@ class MainActivity : AppCompatActivity() {
         cloud=CloudSync(this,"https://javas-pos-cloud-zisfx8.v2.appdeploy.ai")
         storeId=getSharedPreferences("javas_pos",MODE_PRIVATE).getString("store_id","JAVAS001")?:"JAVAS001"
         loadData()
+        val prefs=getSharedPreferences("javas_pos",MODE_PRIVATE)
+        val hasExistingBusinessData=products.isNotEmpty()||salesHistory.isNotEmpty()||suppliers.isNotEmpty()||customers.isNotEmpty()||tickets.isNotEmpty()
+        if(hasExistingBusinessData && prefs.getLong("data_updated_at",0L)==0L){
+            prefs.edit().putLong("data_updated_at",System.currentTimeMillis()).apply()
+        }
         seedUsers()
         showLogin()
     }
@@ -227,10 +232,13 @@ class MainActivity : AppCompatActivity() {
                     val remote=cloud.getSnapshot(result.storeId,result.token)
                     val hasRemote=hasBusinessData(remote)
                     val hasLocal=products.isNotEmpty()||salesHistory.isNotEmpty()||suppliers.isNotEmpty()||customers.isNotEmpty()||tickets.isNotEmpty()
-                    if(!hasRemote&&hasLocal) cloud.putSnapshot(result.storeId,result.token,buildCloudSnapshot())
+                    val localUpdated=getSharedPreferences("javas_pos",MODE_PRIVATE).getLong("data_updated_at",0L)
+                    val remoteUpdated=remote.optLong("data_updated_at",0L)
+                    val keepLocal=hasLocal && (!hasRemote || localUpdated>remoteUpdated)
+                    if(keepLocal) cloud.putSnapshot(result.storeId,result.token,buildCloudSnapshot())
                     runOnUiThread{
                         cloudToken=result.token
-                        if(hasRemote) applyCloudSnapshot(remote)
+                        if(hasRemote && !keepLocal) applyCloudSnapshot(remote)
                         mainHandler.removeCallbacks(cloudPoll)
                         mainHandler.postDelayed(cloudPoll,5000)
                     }
@@ -315,7 +323,8 @@ class MainActivity : AppCompatActivity() {
             maxLines=1;ellipsize=TextUtils.TruncateAt.END
         },matchWrap(top=5))
         val actions=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
-        actions.addView(secondaryButton("동기화"){pullCloudAsync(true)},LinearLayout.LayoutParams(0,dp(38),1f).apply{marginEnd=dp(4)})
+        actions.addView(secondaryButton("서버 저장"){pushCloudAsync(true)},LinearLayout.LayoutParams(0,dp(38),1f).apply{marginEnd=dp(4)})
+        actions.addView(secondaryButton("서버 불러오기"){pullCloudAsync(true)},LinearLayout.LayoutParams(0,dp(38),1f).apply{marginEnd=dp(4)})
         actions.addView(secondaryButton("로그아웃"){logout()},LinearLayout.LayoutParams(0,dp(38),1f))
         head.addView(actions,matchWrap(top=5))
         root.addView(head,matchWrap(bottom=7))
@@ -1096,6 +1105,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveData(){
         localDataVersion++
+        val pref=getSharedPreferences("javas_pos",MODE_PRIVATE)
+        val dataUpdatedAt=if(applyingCloud) pref.getLong("data_updated_at",0L) else System.currentTimeMillis()
         val pa=JSONArray()
         products.values.forEach{p->pa.put(JSONObject().put("code",p.code).put("name",p.name).put("price",p.price).put("stock",p.stock).put("costPrice",p.costPrice).put("category",p.category).put("supplier",p.supplier).put("receivedDate",p.receivedDate).put("storageLocation",p.storageLocation).put("expiryDate",p.expiryDate).put("minStock",p.minStock))}
         val sha=JSONArray()
@@ -1112,10 +1123,11 @@ class MainActivity : AppCompatActivity() {
         tickets.forEach{t->ta.put(JSONObject().put("id",t.id).put("createdAt",t.createdAt).put("type",t.type).put("customerName",t.customerName).put("phone",t.phone).put("item",t.item).put("dueDate",t.dueDate).put("status",t.status).put("memo",t.memo))}
         val ua=JSONArray()
         users.values.forEach{u->ua.put(JSONObject().put("id",u.id).put("name",u.name).put("role",u.role.name).put("passwordHash",u.passwordHash).put("active",u.active))}
-        getSharedPreferences("javas_pos",MODE_PRIVATE).edit()
+        pref.edit()
             .putString("products",pa.toString()).putString("stock_history",sha.toString()).putString("sales_history",sa.toString())
             .putString("suppliers",spa.toString()).putString("purchase_history",pra.toString()).putString("customers",ca.toString())
-            .putString("tickets",ta.toString()).putString("users",ua.toString()).putInt("sales",salesTotal).apply()
+            .putString("tickets",ta.toString()).putString("users",ua.toString()).putInt("sales",salesTotal)
+            .putLong("data_updated_at",dataUpdatedAt).apply()
         if(!applyingCloud && cloudToken.isNotBlank()) pushCloudAsync()
     }
 
@@ -1136,6 +1148,7 @@ class MainActivity : AppCompatActivity() {
             .put("customers",JSONArray(pref.getString("customers","[]")))
             .put("tickets",JSONArray(pref.getString("tickets","[]")))
             .put("users",JSONArray(pref.getString("users","[]")))
+            .put("data_updated_at",pref.getLong("data_updated_at",0L))
     }
 
     private fun applyCloudSnapshot(snapshot:JSONObject){
@@ -1151,7 +1164,10 @@ class MainActivity : AppCompatActivity() {
             val remoteSales=snapshot.optJSONArray("sales_history")?:JSONArray()
             var total=0
             for(i in 0 until remoteSales.length()) total+=remoteSales.optJSONObject(i)?.optInt("total",0)?:0
-            edit.putInt("sales",total).putString("store_id",storeId).apply()
+            edit.putInt("sales",total)
+                .putString("store_id",storeId)
+                .putLong("data_updated_at",snapshot.optLong("data_updated_at",0L))
+                .apply()
 
             products.clear()
             stockHistory.clear()
@@ -1180,9 +1196,17 @@ class MainActivity : AppCompatActivity() {
                         if(showMessage) toast("방금 저장한 상품을 보호했습니다.")
                         return@runOnUiThread
                     }
+                    val pref=getSharedPreferences("javas_pos",MODE_PRIVATE)
+                    val localUpdated=pref.getLong("data_updated_at",0L)
+                    val remoteUpdated=snapshot.optLong("data_updated_at",0L)
+                    val hasLocal=products.isNotEmpty()||salesHistory.isNotEmpty()||suppliers.isNotEmpty()||customers.isNotEmpty()||tickets.isNotEmpty()
+                    if(hasLocal && localUpdated>remoteUpdated){
+                        if(showMessage) toast("휴대폰 데이터가 더 최신입니다. 서버 저장을 눌러 주세요.")
+                        return@runOnUiThread
+                    }
                     applyCloudSnapshot(snapshot)
                     if(currentScreen=="dashboard") showDashboard()
-                    if(showMessage) toast("최신 매장 데이터 동기화 완료")
+                    if(showMessage) toast("최신 매장 데이터 불러오기 완료")
                 }
             }catch(_:Exception){
                 if(showMessage) runOnUiThread{toast("동기화 서버 연결을 확인해 주세요.")}
@@ -1190,13 +1214,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun pushCloudAsync(){
-        if(cloudToken.isBlank()) return
-        val snapshot=try{buildCloudSnapshot()}catch(_:Exception){return}
+    private fun pushCloudAsync(showMessage:Boolean=false){
+        if(cloudToken.isBlank()){
+            if(showMessage) toast("서버 연결 후 다시 시도해 주세요.")
+            return
+        }
+        val snapshot=try{buildCloudSnapshot()}catch(_:Exception){
+            if(showMessage) toast("서버 저장 자료를 만들 수 없습니다.")
+            return
+        }
         syncExecutor.execute{
             try{
                 cloud.putSnapshot(storeId,cloudToken,snapshot)
+                if(showMessage) runOnUiThread{toast("서버 백업 완료")}
             }catch(_:Exception){
+                if(showMessage) runOnUiThread{toast("서버 저장 연결을 확인해 주세요.")}
             }
         }
     }
