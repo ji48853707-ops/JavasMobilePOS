@@ -488,6 +488,41 @@ class MainActivity : AppCompatActivity() {
         if(searchQuery.isNotBlank()) topSearch.addView(secondaryButton("검색 초기화"){showRegister()},matchWrap(top=6))
         content.addView(topSearch,matchWrap(bottom=7))
 
+        if(searchQuery.isNotBlank()){
+            val q=searchQuery.trim().lowercase(Locale.KOREA)
+            val visibleProducts=products.values.filter{p->
+                q.isBlank() ||
+                p.name.lowercase(Locale.KOREA).contains(q) ||
+                p.code.lowercase(Locale.KOREA).contains(q) ||
+                p.category.lowercase(Locale.KOREA).contains(q) ||
+                p.supplier.lowercase(Locale.KOREA).contains(q)
+            }
+            val results=card().apply{
+                orientation=LinearLayout.VERTICAL
+                setPadding(dp(10),dp(10),dp(10),dp(10))
+                addView(text("검색 결과 ${visibleProducts.size}개",22,true))
+            }
+            visibleProducts.forEach{p->
+                val item=LinearLayout(this).apply{
+                    orientation=LinearLayout.VERTICAL
+                    setPadding(dp(10),dp(12),dp(10),dp(12))
+                    background=rounded(Color.rgb(247,250,251),Color.rgb(215,225,230))
+                    isClickable=true
+                    isFocusable=true
+                    addView(text(p.name,18,true))
+                    addView(text("${p.code} · ${money(p.price)}원 · 재고 ${p.stock}개",14,false,Color.GRAY),matchWrap(top=3))
+                    val meta=listOf(p.category,p.supplier,p.storageLocation).filter{it.isNotBlank()}.joinToString(" · ")
+                    if(meta.isNotBlank()) addView(text(meta,13,false,Color.GRAY),matchWrap(top=2))
+                    addView(text("이 상품을 눌러 수정",12,true,Color.rgb(11,75,107)),matchWrap(top=6))
+                    setOnClickListener{showRegister(editCode=p.code)}
+                }
+                results.addView(item,matchWrap(top=7))
+            }
+            if(visibleProducts.isEmpty()) results.addView(centerText("검색 결과가 없습니다.",17,false,Color.GRAY),matchWrap(top=10,bottom=10))
+            content.addView(results,matchWrap())
+            return
+        }
+
         val c=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10))}
         c.addView(text("상품등록 · 수정 · 취소",20,true))
         c.addView(text(if(editing==null)"새 상품 정보를 입력해 주세요." else "등록된 상품 정보를 수정하는 중입니다.",14,false,Color.GRAY),matchWrap(top=4))
@@ -995,7 +1030,17 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread{
             beepAndVibrate()
             when(currentMode){
-                ScanMode.REGISTER->{stopScanner();showRegister(code);toast("인식 성공: $code")}
+                ScanMode.REGISTER->{
+                    stopScanner()
+                    val existing=findProductByCode(code)
+                    if(existing!=null){
+                        showRegister(editCode=existing.code)
+                        toast("등록된 상품을 불러왔습니다.")
+                    }else{
+                        showRegister(code)
+                        toast("인식 성공: $code")
+                    }
+                }
                 ScanMode.CALCULATE->processCalculateCode(code)
             }
         }
@@ -1250,22 +1295,45 @@ class MainActivity : AppCompatActivity() {
         return d.joinToString(""){"%02x".format(it)}
     }
 
-    private fun normalizeCode(s:String)=s.trim().replace(" ","").replace("\n","").replace("\r","")
+    private fun normalizeCode(s:String)=s.trim().replace(Regex("\\s+"),"")
 
     private fun codeCandidates(raw:String):List<String>{
         val c=normalizeCode(raw)
         if(c.isBlank()) return emptyList()
+
         val result=linkedSetOf(c)
-        if(c.all{it.isDigit()}){
-            if(c.length==12) result.add("0$c")
-            if(c.length==13 && c.startsWith("0")) result.add(c.drop(1))
+        val numericLike=c.all{it.isDigit() || it=='-'}
+        if(numericLike){
+            val digits=c.filter{it.isDigit()}
+            if(digits.isNotBlank()) result.add(digits)
+
+            when(digits.length){
+                12->{
+                    result.add("0$digits")
+                    result.add("00$digits")
+                }
+                13->{
+                    if(digits.startsWith("0")) result.add(digits.drop(1))
+                    result.add("0$digits")
+                }
+                14->{
+                    if(digits.startsWith("0")) result.add(digits.drop(1))
+                    if(digits.startsWith("00")) result.add(digits.drop(2))
+                }
+            }
         }
         return result.toList()
     }
 
     private fun findProductByCode(raw:String):Product?{
-        codeCandidates(raw).forEach{k->products[k]?.let{return it}}
-        return null
+        val wanted=codeCandidates(raw).toSet()
+        if(wanted.isEmpty()) return null
+
+        wanted.forEach{k->products[k]?.let{return it}}
+
+        return products.values.firstOrNull{p->
+            codeCandidates(p.code).any{it in wanted}
+        }
     }
 
     private fun money(v:Int)=NumberFormat.getNumberInstance(Locale.KOREA).format(v)
