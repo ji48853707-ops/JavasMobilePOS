@@ -103,6 +103,7 @@ class MainActivity : AppCompatActivity() {
     private val users=linkedMapOf<String,UserAccount>()
     private var salesTotal=0
     private var currentUser:UserAccount?=null
+    @Volatile private var localDataVersion=0L
 
     private var lastAcceptedCode=""
     private var lastAcceptedAt=0L
@@ -455,7 +456,7 @@ class MainActivity : AppCompatActivity() {
         content.addView(cc,matchWrap())
     }
 
-    private fun showRegister(prefillCode:String="",editCode:String?=null){
+    private fun showRegister(prefillCode:String="",editCode:String?=null,searchQuery:String=""){
         currentScreen="products"
         if(!canManageProducts()){toast("상품관리 권한이 없습니다.");showDashboard();return}
         stopScanner();content.removeAllViews();currentMode=ScanMode.REGISTER
@@ -502,7 +503,8 @@ class MainActivity : AppCompatActivity() {
             if(nc.isBlank()||n.isBlank()||sp==null||q==null||min==null||cp<0||sp<0||q<0||min<0){toast("상품명, 코드, 가격, 재고를 정확히 입력해 주세요.");return@primaryButton}
             if(rd.isNotBlank()&&!isValidDate(rd)){toast("입고일은 YYYY-MM-DD 형식입니다.");return@primaryButton}
             if(ex.isNotBlank()&&!isValidDate(ex)){toast("유통기한은 YYYY-MM-DD 형식입니다.");return@primaryButton}
-            if(products[nc]!=null && nc!=editCode){toast("이미 등록된 바코드/QR 코드입니다.");return@primaryButton}
+            val duplicate=findProductByCode(nc)
+            if(duplicate!=null && duplicate.code!=editCode){toast("이미 등록된 바코드/QR 코드입니다.");return@primaryButton}
             if(editing!=null && editCode!=nc){products.remove(editCode);cart.remove(editCode)}
             products[nc]=Product(nc,n,sp,q,cp,category.text.toString().trim(),supplier.text.toString().trim(),rd,location.text.toString().trim(),ex,min)
             if(editing==null && q>0) addStockMovement(nc,"입고",q,q,"상품 최초등록")
@@ -513,7 +515,29 @@ class MainActivity : AppCompatActivity() {
         content.addView(c,matchWrap(bottom=7))
 
         val list=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10));addView(text("등록 상품",24,true))}
-        products.values.toList().forEach{p->
+        val search=field("상품명 · 바코드 · 분류 · 거래처 검색").apply{
+            setText(searchQuery)
+            setSingleLine(true)
+        }
+        val searchRow=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
+        searchRow.addView(search,LinearLayout.LayoutParams(0,dp(42),1f))
+        searchRow.addView(
+            secondaryButton("검색"){showRegister(searchQuery=search.text.toString().trim())},
+            LinearLayout.LayoutParams(dp(78),dp(42)).apply{marginStart=dp(6)}
+        )
+        list.addView(searchRow,matchWrap(top=8))
+        if(searchQuery.isNotBlank()) list.addView(secondaryButton("검색 초기화"){showRegister()},matchWrap(top=6))
+
+        val q=searchQuery.trim().lowercase(Locale.KOREA)
+        val visibleProducts=products.values.filter{p->
+            q.isBlank() ||
+            p.name.lowercase(Locale.KOREA).contains(q) ||
+            p.code.lowercase(Locale.KOREA).contains(q) ||
+            p.category.lowercase(Locale.KOREA).contains(q) ||
+            p.supplier.lowercase(Locale.KOREA).contains(q)
+        }
+
+        visibleProducts.forEach{p->
             val item=LinearLayout(this).apply{
                 orientation=LinearLayout.VERTICAL;setPadding(0,dp(12),0,dp(12))
                 addView(text(p.name,18,true))
@@ -527,7 +551,8 @@ class MainActivity : AppCompatActivity() {
             }
             list.addView(item)
         }
-        if(products.isEmpty())list.addView(centerText("등록 상품 없음",17,false,Color.GRAY),matchWrap(top=7))
+        if(products.isEmpty()) list.addView(centerText("등록 상품 없음",17,false,Color.GRAY),matchWrap(top=7))
+        else if(visibleProducts.isEmpty()) list.addView(centerText("검색 결과가 없습니다.",17,false,Color.GRAY),matchWrap(top=7))
         content.addView(list,matchWrap())
     }
 
@@ -961,7 +986,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun processCalculateCode(code:String){
-        val p=products[code]
+        val p=findProductByCode(code)
         if(p==null){
             stopScanner()
             val b=android.app.AlertDialog.Builder(this).setTitle("미등록 상품").setMessage("코드: $code")
@@ -969,13 +994,14 @@ class MainActivity : AppCompatActivity() {
             b.setNegativeButton("계속 스캔"){_,_->showCalculate();ensureCamera(ScanMode.CALCULATE)}.show()
             return
         }
-        val e=cart[code]
+        val productCode=p.code
+        val e=cart[productCode]
         if(e!=null){
             if(e.qty>=p.stock){toast("현재 재고 수량까지 담겼습니다.");return}
             e.qty++
         }else{
             if(p.stock<=0){toast("재고가 없는 상품입니다.");return}
-            cart[code]=CartLine(p,1)
+            cart[productCode]=CartLine(p,1)
         }
         showCalculate();ensureCamera(ScanMode.CALCULATE)
     }
@@ -1069,6 +1095,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun saveData(){
+        localDataVersion++
         val pa=JSONArray()
         products.values.forEach{p->pa.put(JSONObject().put("code",p.code).put("name",p.name).put("price",p.price).put("stock",p.stock).put("costPrice",p.costPrice).put("category",p.category).put("supplier",p.supplier).put("receivedDate",p.receivedDate).put("storageLocation",p.storageLocation).put("expiryDate",p.expiryDate).put("minStock",p.minStock))}
         val sha=JSONArray()
@@ -1144,10 +1171,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun pullCloudAsync(showMessage:Boolean){
         if(cloudToken.isBlank()||cart.isNotEmpty()) return
+        val versionAtRequest=localDataVersion
         syncExecutor.execute{
             try{
                 val snapshot=cloud.getSnapshot(storeId,cloudToken)
                 runOnUiThread{
+                    if(versionAtRequest!=localDataVersion){
+                        if(showMessage) toast("방금 저장한 상품을 보호했습니다.")
+                        return@runOnUiThread
+                    }
                     applyCloudSnapshot(snapshot)
                     if(currentScreen=="dashboard") showDashboard()
                     if(showMessage) toast("최신 매장 데이터 동기화 완료")
@@ -1180,6 +1212,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun normalizeCode(s:String)=s.trim().replace(" ","").replace("\n","").replace("\r","")
+
+    private fun codeCandidates(raw:String):List<String>{
+        val c=normalizeCode(raw)
+        if(c.isBlank()) return emptyList()
+        val result=linkedSetOf(c)
+        if(c.all{it.isDigit()}){
+            if(c.length==12) result.add("0$c")
+            if(c.length==13 && c.startsWith("0")) result.add(c.drop(1))
+        }
+        return result.toList()
+    }
+
+    private fun findProductByCode(raw:String):Product?{
+        codeCandidates(raw).forEach{k->products[k]?.let{return it}}
+        return null
+    }
+
     private fun money(v:Int)=NumberFormat.getNumberInstance(Locale.KOREA).format(v)
     private fun todayString()=SimpleDateFormat("yyyy-MM-dd",Locale.KOREA).format(Date())
     private fun dateKey(t:Long)=SimpleDateFormat("yyyy-MM-dd",Locale.KOREA).format(Date(t))
