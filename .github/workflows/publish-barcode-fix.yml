@@ -1,0 +1,33 @@
+name: Publish JAVAS POS Barcode Fix
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/publish-barcode-fix.yml'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download APK artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release
+          gh run download 36136549361 --repo "${{ github.repository }}" --name JavasMobilePOS-debug-apk --dir release
+          mv release/app-debug.apk release/JAVAS-FISHING-POS-barcode-search-fix.apk
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v1.1.2-barcode-fix-20260925" release/JAVAS-FISHING-POS-barcode-search-fix.apk \
+            --repo "${{ github.repository }}" \
+            --target "38b95e5aaee866d177c064fb37b5416457dfb1c4" \
+            --title "JAVAS FISHING POS 바코드·검색 수정본" \
+            --notes "등록된 바코드 재인식 오류 수정, 12/13/14자리 및 앞자리 0 차이 인식 보완, 상품 검색 후 검색결과를 바로 표시하고 상품을 누르면 수정 화면으로 진입하도록 수정했습니다."
