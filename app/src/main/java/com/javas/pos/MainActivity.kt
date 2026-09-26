@@ -103,7 +103,6 @@ class MainActivity : AppCompatActivity() {
     private val users=linkedMapOf<String,UserAccount>()
     private var salesTotal=0
     private var currentUser:UserAccount?=null
-    @Volatile private var localDataVersion=0L
 
     private var lastAcceptedCode=""
     private var lastAcceptedAt=0L
@@ -134,11 +133,6 @@ class MainActivity : AppCompatActivity() {
         cloud=CloudSync(this,"https://javas-pos-cloud-zisfx8.v2.appdeploy.ai")
         storeId=getSharedPreferences("javas_pos",MODE_PRIVATE).getString("store_id","JAVAS001")?:"JAVAS001"
         loadData()
-        val prefs=getSharedPreferences("javas_pos",MODE_PRIVATE)
-        val hasExistingBusinessData=products.isNotEmpty()||salesHistory.isNotEmpty()||suppliers.isNotEmpty()||customers.isNotEmpty()||tickets.isNotEmpty()
-        if(hasExistingBusinessData && prefs.getLong("data_updated_at",0L)==0L){
-            prefs.edit().putLong("data_updated_at",System.currentTimeMillis()).apply()
-        }
         seedUsers()
         showLogin()
     }
@@ -232,13 +226,10 @@ class MainActivity : AppCompatActivity() {
                     val remote=cloud.getSnapshot(result.storeId,result.token)
                     val hasRemote=hasBusinessData(remote)
                     val hasLocal=products.isNotEmpty()||salesHistory.isNotEmpty()||suppliers.isNotEmpty()||customers.isNotEmpty()||tickets.isNotEmpty()
-                    val localUpdated=getSharedPreferences("javas_pos",MODE_PRIVATE).getLong("data_updated_at",0L)
-                    val remoteUpdated=remote.optLong("data_updated_at",0L)
-                    val keepLocal=hasLocal && (!hasRemote || localUpdated>remoteUpdated)
-                    if(keepLocal) cloud.putSnapshot(result.storeId,result.token,buildCloudSnapshot())
+                    if(!hasRemote&&hasLocal) cloud.putSnapshot(result.storeId,result.token,buildCloudSnapshot())
                     runOnUiThread{
                         cloudToken=result.token
-                        if(hasRemote && !keepLocal) applyCloudSnapshot(remote)
+                        if(hasRemote) applyCloudSnapshot(remote)
                         mainHandler.removeCallbacks(cloudPoll)
                         mainHandler.postDelayed(cloudPoll,5000)
                     }
@@ -323,8 +314,7 @@ class MainActivity : AppCompatActivity() {
             maxLines=1;ellipsize=TextUtils.TruncateAt.END
         },matchWrap(top=5))
         val actions=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
-        actions.addView(secondaryButton("서버 저장"){pushCloudAsync(true)},LinearLayout.LayoutParams(0,dp(38),1f).apply{marginEnd=dp(4)})
-        actions.addView(secondaryButton("서버 불러오기"){pullCloudAsync(true)},LinearLayout.LayoutParams(0,dp(38),1f).apply{marginEnd=dp(4)})
+        actions.addView(secondaryButton("동기화"){pullCloudAsync(true)},LinearLayout.LayoutParams(0,dp(38),1f).apply{marginEnd=dp(4)})
         actions.addView(secondaryButton("로그아웃"){logout()},LinearLayout.LayoutParams(0,dp(38),1f))
         head.addView(actions,matchWrap(top=5))
         root.addView(head,matchWrap(bottom=7))
@@ -472,26 +462,25 @@ class MainActivity : AppCompatActivity() {
         val editing=editCode?.let{products[it]}
         val oldStock=editing?.stock
 
-        val topSearch=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10))}
-        topSearch.addView(text("상품 검색",20,true))
-        val topSearchField=field("상품명 · 바코드 · 분류 · 거래처").apply{
+        val searchCard=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10))}
+        searchCard.addView(text("상품 검색",20,true))
+        val searchField=field("예: 경원 아쿠아텍").apply{
             setText(searchQuery)
             setSingleLine(true)
         }
-        val topSearchRow=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
-        topSearchRow.addView(topSearchField,LinearLayout.LayoutParams(0,dp(42),1f))
-        topSearchRow.addView(
-            primaryButton("검색"){showRegister(searchQuery=topSearchField.text.toString().trim())},
+        val searchRow=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
+        searchRow.addView(searchField,LinearLayout.LayoutParams(0,dp(42),1f))
+        searchRow.addView(
+            primaryButton("검색"){showRegister(searchQuery=searchField.text.toString().trim())},
             LinearLayout.LayoutParams(dp(78),dp(42)).apply{marginStart=dp(6)}
         )
-        topSearch.addView(topSearchRow,matchWrap(top=8))
-        if(searchQuery.isNotBlank()) topSearch.addView(secondaryButton("검색 초기화"){showRegister()},matchWrap(top=6))
-        content.addView(topSearch,matchWrap(bottom=7))
+        searchCard.addView(searchRow,matchWrap(top=8))
+        if(searchQuery.isNotBlank()) searchCard.addView(secondaryButton("검색 초기화"){showRegister()},matchWrap(top=6))
+        content.addView(searchCard,matchWrap(bottom=7))
 
         if(searchQuery.isNotBlank()){
             val q=searchQuery.trim().lowercase(Locale.KOREA)
-            val visibleProducts=products.values.filter{p->
-                q.isBlank() ||
+            val matches=products.values.filter{p->
                 p.name.lowercase(Locale.KOREA).contains(q) ||
                 p.code.lowercase(Locale.KOREA).contains(q) ||
                 p.category.lowercase(Locale.KOREA).contains(q) ||
@@ -500,10 +489,10 @@ class MainActivity : AppCompatActivity() {
             val results=card().apply{
                 orientation=LinearLayout.VERTICAL
                 setPadding(dp(10),dp(10),dp(10),dp(10))
-                addView(text("검색 결과 ${visibleProducts.size}개",22,true))
+                addView(text("검색 결과 ${matches.size}개",22,true))
             }
-            visibleProducts.forEach{p->
-                val item=LinearLayout(this).apply{
+            matches.forEach{p->
+                val row=LinearLayout(this).apply{
                     orientation=LinearLayout.VERTICAL
                     setPadding(dp(10),dp(12),dp(10),dp(12))
                     background=rounded(Color.rgb(247,250,251),Color.rgb(215,225,230))
@@ -511,14 +500,12 @@ class MainActivity : AppCompatActivity() {
                     isFocusable=true
                     addView(text(p.name,18,true))
                     addView(text("${p.code} · ${money(p.price)}원 · 재고 ${p.stock}개",14,false,Color.GRAY),matchWrap(top=3))
-                    val meta=listOf(p.category,p.supplier,p.storageLocation).filter{it.isNotBlank()}.joinToString(" · ")
-                    if(meta.isNotBlank()) addView(text(meta,13,false,Color.GRAY),matchWrap(top=2))
-                    addView(text("이 상품을 눌러 수정",12,true,Color.rgb(11,75,107)),matchWrap(top=6))
+                    addView(text("눌러서 수정",12,true,Color.rgb(11,75,107)),matchWrap(top=6))
                     setOnClickListener{showRegister(editCode=p.code)}
                 }
-                results.addView(item,matchWrap(top=7))
+                results.addView(row,matchWrap(top=7))
             }
-            if(visibleProducts.isEmpty()) results.addView(centerText("검색 결과가 없습니다.",17,false,Color.GRAY),matchWrap(top=10,bottom=10))
+            if(matches.isEmpty()) results.addView(centerText("검색 결과가 없습니다.",17,false,Color.GRAY),matchWrap(top=10,bottom=10))
             content.addView(results,matchWrap())
             return
         }
@@ -574,21 +561,8 @@ class MainActivity : AppCompatActivity() {
         c.addView(secondaryButton(if(editing==null)"등록 취소" else "수정 취소"){showRegister()},matchWrap(top=7))
         content.addView(c,matchWrap(bottom=7))
 
-        val q=searchQuery.trim().lowercase(Locale.KOREA)
-        val visibleProducts=products.values.filter{p->
-            q.isBlank() ||
-            p.name.lowercase(Locale.KOREA).contains(q) ||
-            p.code.lowercase(Locale.KOREA).contains(q) ||
-            p.category.lowercase(Locale.KOREA).contains(q) ||
-            p.supplier.lowercase(Locale.KOREA).contains(q)
-        }
-
-        val list=card().apply{
-            orientation=LinearLayout.VERTICAL
-            setPadding(dp(10),dp(10),dp(10),dp(10))
-            addView(text(if(q.isBlank())"등록 상품 ${products.size}개" else "검색 결과 ${visibleProducts.size}개",24,true))
-        }
-        visibleProducts.forEach{p->
+        val list=card().apply{orientation=LinearLayout.VERTICAL;setPadding(dp(10),dp(10),dp(10),dp(10));addView(text("등록 상품",24,true))}
+        products.values.toList().forEach{p->
             val item=LinearLayout(this).apply{
                 orientation=LinearLayout.VERTICAL;setPadding(0,dp(12),0,dp(12))
                 addView(text(p.name,18,true))
@@ -602,8 +576,7 @@ class MainActivity : AppCompatActivity() {
             }
             list.addView(item)
         }
-        if(products.isEmpty()) list.addView(centerText("등록 상품 없음",17,false,Color.GRAY),matchWrap(top=7))
-        else if(visibleProducts.isEmpty()) list.addView(centerText("검색 결과가 없습니다.",17,false,Color.GRAY),matchWrap(top=7))
+        if(products.isEmpty())list.addView(centerText("등록 상품 없음",17,false,Color.GRAY),matchWrap(top=7))
         content.addView(list,matchWrap())
     }
 
@@ -1156,9 +1129,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun saveData(){
-        localDataVersion++
-        val pref=getSharedPreferences("javas_pos",MODE_PRIVATE)
-        val dataUpdatedAt=if(applyingCloud) pref.getLong("data_updated_at",0L) else System.currentTimeMillis()
         val pa=JSONArray()
         products.values.forEach{p->pa.put(JSONObject().put("code",p.code).put("name",p.name).put("price",p.price).put("stock",p.stock).put("costPrice",p.costPrice).put("category",p.category).put("supplier",p.supplier).put("receivedDate",p.receivedDate).put("storageLocation",p.storageLocation).put("expiryDate",p.expiryDate).put("minStock",p.minStock))}
         val sha=JSONArray()
@@ -1175,11 +1145,10 @@ class MainActivity : AppCompatActivity() {
         tickets.forEach{t->ta.put(JSONObject().put("id",t.id).put("createdAt",t.createdAt).put("type",t.type).put("customerName",t.customerName).put("phone",t.phone).put("item",t.item).put("dueDate",t.dueDate).put("status",t.status).put("memo",t.memo))}
         val ua=JSONArray()
         users.values.forEach{u->ua.put(JSONObject().put("id",u.id).put("name",u.name).put("role",u.role.name).put("passwordHash",u.passwordHash).put("active",u.active))}
-        pref.edit()
+        getSharedPreferences("javas_pos",MODE_PRIVATE).edit()
             .putString("products",pa.toString()).putString("stock_history",sha.toString()).putString("sales_history",sa.toString())
             .putString("suppliers",spa.toString()).putString("purchase_history",pra.toString()).putString("customers",ca.toString())
-            .putString("tickets",ta.toString()).putString("users",ua.toString()).putInt("sales",salesTotal)
-            .putLong("data_updated_at",dataUpdatedAt).apply()
+            .putString("tickets",ta.toString()).putString("users",ua.toString()).putInt("sales",salesTotal).apply()
         if(!applyingCloud && cloudToken.isNotBlank()) pushCloudAsync()
     }
 
@@ -1200,7 +1169,6 @@ class MainActivity : AppCompatActivity() {
             .put("customers",JSONArray(pref.getString("customers","[]")))
             .put("tickets",JSONArray(pref.getString("tickets","[]")))
             .put("users",JSONArray(pref.getString("users","[]")))
-            .put("data_updated_at",pref.getLong("data_updated_at",0L))
     }
 
     private fun applyCloudSnapshot(snapshot:JSONObject){
@@ -1216,10 +1184,7 @@ class MainActivity : AppCompatActivity() {
             val remoteSales=snapshot.optJSONArray("sales_history")?:JSONArray()
             var total=0
             for(i in 0 until remoteSales.length()) total+=remoteSales.optJSONObject(i)?.optInt("total",0)?:0
-            edit.putInt("sales",total)
-                .putString("store_id",storeId)
-                .putLong("data_updated_at",snapshot.optLong("data_updated_at",0L))
-                .apply()
+            edit.putInt("sales",total).putString("store_id",storeId).apply()
 
             products.clear()
             stockHistory.clear()
@@ -1239,26 +1204,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun pullCloudAsync(showMessage:Boolean){
         if(cloudToken.isBlank()||cart.isNotEmpty()) return
-        val versionAtRequest=localDataVersion
         syncExecutor.execute{
             try{
                 val snapshot=cloud.getSnapshot(storeId,cloudToken)
                 runOnUiThread{
-                    if(versionAtRequest!=localDataVersion){
-                        if(showMessage) toast("방금 저장한 상품을 보호했습니다.")
-                        return@runOnUiThread
-                    }
-                    val pref=getSharedPreferences("javas_pos",MODE_PRIVATE)
-                    val localUpdated=pref.getLong("data_updated_at",0L)
-                    val remoteUpdated=snapshot.optLong("data_updated_at",0L)
-                    val hasLocal=products.isNotEmpty()||salesHistory.isNotEmpty()||suppliers.isNotEmpty()||customers.isNotEmpty()||tickets.isNotEmpty()
-                    if(hasLocal && localUpdated>remoteUpdated){
-                        if(showMessage) toast("휴대폰 데이터가 더 최신입니다. 서버 저장을 눌러 주세요.")
-                        return@runOnUiThread
-                    }
                     applyCloudSnapshot(snapshot)
                     if(currentScreen=="dashboard") showDashboard()
-                    if(showMessage) toast("최신 매장 데이터 불러오기 완료")
+                    if(showMessage) toast("최신 매장 데이터 동기화 완료")
                 }
             }catch(_:Exception){
                 if(showMessage) runOnUiThread{toast("동기화 서버 연결을 확인해 주세요.")}
@@ -1266,21 +1218,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun pushCloudAsync(showMessage:Boolean=false){
-        if(cloudToken.isBlank()){
-            if(showMessage) toast("서버 연결 후 다시 시도해 주세요.")
-            return
-        }
-        val snapshot=try{buildCloudSnapshot()}catch(_:Exception){
-            if(showMessage) toast("서버 저장 자료를 만들 수 없습니다.")
-            return
-        }
+    private fun pushCloudAsync(){
+        if(cloudToken.isBlank()) return
+        val snapshot=try{buildCloudSnapshot()}catch(_:Exception){return}
         syncExecutor.execute{
             try{
                 cloud.putSnapshot(storeId,cloudToken,snapshot)
-                if(showMessage) runOnUiThread{toast("서버 백업 완료")}
             }catch(_:Exception){
-                if(showMessage) runOnUiThread{toast("서버 저장 연결을 확인해 주세요.")}
             }
         }
     }
@@ -1300,13 +1244,11 @@ class MainActivity : AppCompatActivity() {
     private fun codeCandidates(raw:String):List<String>{
         val c=normalizeCode(raw)
         if(c.isBlank()) return emptyList()
-
         val result=linkedSetOf(c)
         val numericLike=c.all{it.isDigit() || it=='-'}
         if(numericLike){
             val digits=c.filter{it.isDigit()}
             if(digits.isNotBlank()) result.add(digits)
-
             when(digits.length){
                 12->{
                     result.add("0$digits")
@@ -1328,12 +1270,8 @@ class MainActivity : AppCompatActivity() {
     private fun findProductByCode(raw:String):Product?{
         val wanted=codeCandidates(raw).toSet()
         if(wanted.isEmpty()) return null
-
         wanted.forEach{k->products[k]?.let{return it}}
-
-        return products.values.firstOrNull{p->
-            codeCandidates(p.code).any{it in wanted}
-        }
+        return products.values.firstOrNull{p->codeCandidates(p.code).any{it in wanted}}
     }
 
     private fun money(v:Int)=NumberFormat.getNumberInstance(Locale.KOREA).format(v)
