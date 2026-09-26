@@ -1,0 +1,33 @@
+name: Publish JAVAS POS Minimal Fix
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/publish-minimal-fix.yml'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download APK artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release
+          gh run download 36223693642 --repo "${{ github.repository }}" --name JavasMobilePOS-debug-apk --dir release
+          mv release/app-debug.apk release/JAVAS-FISHING-POS-minimal-fix.apk
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "minimal-fix-20260926" release/JAVAS-FISHING-POS-minimal-fix.apk \
+            --repo "${{ github.repository }}" \
+            --target "845557b8e9603a02fdf04260a32a3aa882d4740d" \
+            --title "JAVAS FISHING POS 최소수정본" \
+            --notes "기존 POS 기준 화면과 기능은 그대로 유지하고, 등록된 바코드 재인식 오류와 상품 검색 후 바로 수정 진입 기능만 수정한 버전입니다."
